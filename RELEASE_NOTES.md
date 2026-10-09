@@ -69,12 +69,19 @@ dsh plugin --profile web add github:mutoharohfiqhiabcd-source/dsh-lead-panel
 ### 自检
 
 ```powershell
-node test/self-check.mjs
+npm test
 ```
 
-25 项断言：Host 纯逻辑（用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖）
-+ 浏览器半边（假 `window.__ModuleLoader__` / 假 react 下注册槽位、组件可构造、
-防翻译标记在位）。不依赖 DSH。
+两套断言，都不依赖 DSH：
+
+- `test/self-check.mjs`（25 项）：Host 纯逻辑（用量折叠、金额折算、计划抽取、消息
+  过滤、价目表覆盖）+ 浏览器半边（假 `window.__ModuleLoader__` / 假 react 下注册槽位、
+  组件可构造、防翻译标记在位）。
+- `test/host-smoke.mjs`（29 项）：假 ctx / 假服务驱动真实 HTTP 处理器 —— 验证
+  `POST /send`、`/dispatch` 会给 `sessionController.prompt` 传 `AbortSignal`（曾经漏传，
+  面板点「发送」直接报 `Cannot read properties of undefined (reading 'throwIfAborted')`）、
+  `/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志）、金额按牌价折算、
+  异常以 JSON 返回。字符串形式的计数会被强制转成数字而不是拼接。
 
 ### 已知边界
 

@@ -294,6 +294,17 @@ function extractPlan(messages) {
   return null
 }
 
+/**
+ * 把任何来路不明的计数变成数字。
+ * token 计数理论上都是 number，但持久日志来自不同版本、也可能被别的插件写坏；
+ * 一旦混进字符串，`+=` 会变成**拼接**（"0" + "120" → "0120"）而不是相加，
+ * 金额随后全错。宁可把不可解析的值当 0，也不要算出个看着像数字的垃圾。
+ */
+function num(value) {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
 function totalsOf(projections, session) {
   if (!projections || !session) return null
   try {
@@ -301,10 +312,10 @@ function totalsOf(projections, session) {
     const totals = state?.totals
     if (!totals) return null
     return {
-      uncachedInputTokens: totals.uncachedInputTokens ?? 0,
-      cacheReadTokens: totals.cacheReadTokens ?? 0,
-      cacheWriteTokens: totals.cacheWriteTokens ?? 0,
-      outputTokens: totals.outputTokens ?? 0,
+      uncachedInputTokens: num(totals.uncachedInputTokens),
+      cacheReadTokens: num(totals.cacheReadTokens),
+      cacheWriteTokens: num(totals.cacheWriteTokens),
+      outputTokens: num(totals.outputTokens),
     }
   } catch {
     return null
@@ -327,10 +338,10 @@ function foldUsage(events) {
     const usage = event.data?.usage
     if (!usage) continue
     seen += 1
-    total.uncachedInputTokens += usage.inputTokens ?? 0
-    total.cacheReadTokens += usage.cacheReadTokens ?? 0
-    total.cacheWriteTokens += usage.cacheWriteTokens ?? 0
-    total.outputTokens += usage.outputTokens ?? 0
+    total.uncachedInputTokens += num(usage.inputTokens)
+    total.cacheReadTokens += num(usage.cacheReadTokens)
+    total.cacheWriteTokens += num(usage.cacheWriteTokens)
+    total.outputTokens += num(usage.outputTokens)
   }
   return seen === 0 ? null : total
 }
@@ -388,17 +399,19 @@ function addUsage(left, right) {
   }
   if (!right) return base
   return {
-    uncachedInputTokens: base.uncachedInputTokens + (right.uncachedInputTokens ?? 0),
-    cacheReadTokens: base.cacheReadTokens + (right.cacheReadTokens ?? 0),
-    cacheWriteTokens: base.cacheWriteTokens + (right.cacheWriteTokens ?? 0),
-    outputTokens: base.outputTokens + (right.outputTokens ?? 0),
+    uncachedInputTokens: base.uncachedInputTokens + num(right.uncachedInputTokens),
+    cacheReadTokens: base.cacheReadTokens + num(right.cacheReadTokens),
+    cacheWriteTokens: base.cacheWriteTokens + num(right.cacheWriteTokens),
+    outputTokens: base.outputTokens + num(right.outputTokens),
   }
 }
 
 function costOf(usage, price) {
   if (!usage) return 0
-  const cached = usage.cacheReadTokens + usage.cacheWriteTokens
-  return (usage.uncachedInputTokens * price.input + cached * price.cacheRead + usage.outputTokens * price.output) / 1_000_000
+  const cached = num(usage.cacheReadTokens) + num(usage.cacheWriteTokens)
+  return (num(usage.uncachedInputTokens) * price.input
+    + cached * price.cacheRead
+    + num(usage.outputTokens) * price.output) / 1_000_000
 }
 
 /** 领导 + 工人的模型清单（provider 分组），供面板下拉框用。 */
@@ -670,6 +683,7 @@ function createApiHandler(ctx, options) {
  */
 export const internals = {
   normalizeConfig,
+  num,
   foldUsage,
   usageIsEmpty,
   extractPlan,

@@ -71,12 +71,20 @@ dsh plugin --profile web add D:\1231\dsh-lead-panel
 ## 自检
 
 ```powershell
-node test/self-check.mjs     # 或 npm test
+npm test                  # 两个套件一起跑
+node test/self-check.mjs  # 25 项：纯逻辑 + 浏览器半边
+node test/host-smoke.mjs  # 29 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
 ```
 
-25 项断言，覆盖 Host 半边的纯逻辑（用量折叠、金额折算、计划抽取、消息过滤、
-价目表覆盖）与浏览器半边（在假 `window.__ModuleLoader__` + 假 `react` 下注册
-槽位、组件可构造、防翻译标记存在）。不依赖 DSH，改完先跑它。
+- `self-check`：用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖；以及在假
+  `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
+  `conversation.input.left`、组件可构造、防翻译标记在位。
+- `host-smoke`：用假 ctx / 假服务驱动真实处理器，验证 `POST /send`、`/dispatch`
+  会给 `sessionController.prompt` 传 `AbortSignal`（曾经漏传，面板点了报
+  `throwIfAborted`）、`/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志）、
+  金额按牌价折算、异常以 JSON 返回。
+
+两套都不依赖 DSH，改完先跑。
 
 ## 说明与边界
 
