@@ -1,0 +1,9 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.log
+
+# 本地草稿
+.tmp/
+*.local.md

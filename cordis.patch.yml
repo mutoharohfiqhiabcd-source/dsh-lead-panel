@@ -1,0 +1,25 @@
+# dsh-lead-panel —— DSH bundle patch
+#
+# 把「领导面板」挂进 profile：
+#
+#   dsh plugin --profile web add D:\1231\dsh-lead-panel
+#   dsh plugin --profile web add github:<user>/dsh-lead-panel   # 推到仓库之后
+#
+# 也可以直接往 profile 的 cordis.patch.yml 里加：
+#
+#   - insert:
+#       - id: dsh-lead-panel
+#         name: dsh-lead-panel
+#
+# 行配置（写在本 profile 的 cordis.patch.yml 里覆盖）：
+#   title       领导会话的标题          默认「领导」
+#   cwd         领导会话的工作目录      默认 DSH 默认工作区
+#   leadPreset  领导会话用的 agent preset 默认该 profile 的默认 preset
+#   leadModel   { provider, model }     领导初始模型（之后可在面板里随时切换）
+#   currency    金额符号                默认 ¥
+#   prices      { <model>: { input, cacheRead, output } }  元/百万 token，覆盖内置牌价
+#   route       接口前缀                默认 /lead-panel/api
+
+- insert:
+    - id: dsh-lead-panel
+      name: dsh-lead-panel
