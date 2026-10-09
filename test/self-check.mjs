@@ -138,5 +138,12 @@ checkTrue('槽位 order 是数字', typeof slotOptions.order === 'number')
 checkTrue('拿到组件', typeof component === 'function')
 checkTrue('组件带 notranslate（防 Chrome 翻译）', clientSource.includes('notranslate'))
 
+// ── 7) 模型下拉：不再用原生 select，且能区分同名模型 ───────────────────────
+checkTrue('模型选择器是自定义下拉', clientSource.includes('lp-model') && clientSource.includes('lp-menu-item'))
+checkTrue('下拉里有分组标题与当前项打勾', clientSource.includes('lp-menu-group') && clientSource.includes('lp-menu-check'))
+checkTrue('不再使用原生 select（深色主题下看不清）', !/<select/.test(clientSource))
+checkTrue('provider 展示名与模型名分开渲染', clientSource.includes('lp-model-provider') && clientSource.includes('lp-model-value'))
+checkTrue('显示推理强度（reasoningEffort）', clientSource.includes('lp-model-effort') && clientSource.includes('reasoningEffort'))
+
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)
