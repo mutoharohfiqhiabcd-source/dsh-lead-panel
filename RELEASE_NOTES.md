@@ -10,6 +10,9 @@
 
 - **模型切换**：下拉框列出本机全部 provider / 模型（读 `ctx.llm.listProviders()`
   与 `listModels()`），选一下即切换领导会话使用的模型（走 `sessionController.selectModel`）。
+  下拉按 provider 分组、显示模型全名与 `provider · 模型id`、当前项打勾 —— 因为
+  `DeepSeek` 与 `DeepSeek Account` 会提供同名模型，原生 select 在深色主题下根本分不清；
+  头部常显当前模型名 + provider 胶囊 + 推理强度（`reasoningEffort`）。
 - **对话**：和领导的完整来回；它的工具调用（`spawn_teammate` 等）以小标签挂在消息下面。
   运行时上下文、AGENTS.md、技能清单这些注入消息在 Host 侧就被过滤掉，不会刷屏。
 - **计划卡片**：领导按「四段式」回答后（`【需求】【效果】【分工】【预计时间】`），
