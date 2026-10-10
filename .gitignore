@@ -7,3 +7,4 @@ build/
 # 本地草稿
 .tmp/
 *.local.md
+.npmrc
