@@ -11,6 +11,19 @@
   ],
   "type": "module",
   "main": "index.js",
+  "license": "MIT",
+  "author": "mutoharohfiqhiabcd-source",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mutoharohfiqhiabcd-source/dsh-lead-panel.git"
+  },
+  "homepage": "https://github.com/mutoharohfiqhiabcd-source/dsh-lead-panel#readme",
+  "bugs": {
+    "url": "https://github.com/mutoharohfiqhiabcd-source/dsh-lead-panel/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node test/self-check.mjs && node test/host-smoke.mjs"
   },

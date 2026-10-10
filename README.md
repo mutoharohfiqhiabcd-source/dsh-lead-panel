@@ -6,7 +6,7 @@ token、估算金额、用时和预计剩余时间。
 
 当前版本 **0.5.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 30 项 + Host 冒烟 29 项全过
 
-![DSH 领导面板](images/panel.png)
+![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
 > 面板长这样：顶部是状态与**模型选择**（当前模型名 + provider 胶囊 + 推理强度），
 > 中间是计划卡片、对话与工人区，底部是 token / 估算金额 / 用时 / 预计剩余 / 速度
@@ -35,20 +35,20 @@ token、估算金额、用时和预计剩余时间。
 一句「你派几个子智能体来做」就够了 —— 领导自己起名字、定职责，用 `spawn_teammate`
 把队友拉起来（下图里它自己造了「定位分析器 / 翻译 / 配置管理器」三个）：
 
-![让本地 AI 直接创造智能体队友](images/teams-spawn.png)
+![让本地 AI 直接创造智能体队友](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/teams-spawn.png)
 
 ### 2. 队友之间互相汇报、统一推进
 
 队友不是各干各的：它们能用 `send_message` 互发上下文与结论，领导再用
 `wait_agent` 收口、`team_task_*` 协调分工，最后汇总成一份结果：
 
-![智能体队友互相报告与统一推进](images/teams-messaging.png)
+![智能体队友互相报告与统一推进](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/teams-messaging.png)
 
 ### 3. 全队状态一目了然
 
 DSH 自带的「智能体团队」面板列出每个成员与状态（谁是当前会话、谁在跑）：
 
-![智能体团队面板](images/teams-roster.png)
+![智能体团队面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/teams-roster.png)
 
 面板里的「工人」区块读的就是同一份名册（`ctx.agentTeams.listMembers`），
 额外补上每个队友花掉的 token 与估算金额 —— 即使队友干完活被卸载了，

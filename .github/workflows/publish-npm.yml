@@ -1,0 +1,46 @@
+# 发版到 npm
+#
+# 触发方式：
+#   1) 在 GitHub 上创建/发布 Release 时自动跑（推荐）
+#   2) Actions 页面手动 workflow_dispatch
+#
+# 前置条件：仓库 Settings → Secrets and variables → Actions 里加一个
+#   NPM_TOKEN = npm 的 Granular/Automation Access Token（需要 publish 权限）
+# token 只存在 GitHub 里，不经过任何第三方。
+#
+# 注意：npm 的 token 若开了 2FA（默认「需要 OTP」），要用 Automation 类型或
+# 「Bypass 2FA」的 Granular token，否则这一步会卡在一次性验证码上。
+name: publish-npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只打包不发布（npm publish --dry-run）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # 供 npm provenance（可选）
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # 发之前先跑一遍自检：两套断言都不依赖 DSH
+      - name: Self-check
+        run: npm test
+
+      - name: Publish
+        run: npm publish --provenance --access public ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
