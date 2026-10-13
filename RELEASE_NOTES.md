@@ -57,8 +57,14 @@
 ### 安装
 
 ```powershell
+# npm（推荐）
+dsh plugin --profile web add dsh-lead-panel
+
+# GitHub
 dsh plugin --profile web add github:mutoharohfiqhiabcd-source/dsh-lead-panel
 ```
+
+npm 包：<https://www.npmjs.com/package/dsh-lead-panel>
 
 或手工：把本目录复制到 `<DSH_HOME>\profiles\<profile>\node_modules\dsh-lead-panel`，
 再往该 profile 的 `cordis.patch.yml` 追加
