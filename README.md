@@ -117,11 +117,12 @@ DSH 自带的「智能体团队」面板列出每个成员与状态（谁是当�
 ## 安装
 
 ```powershell
-# 从 npm 安装（推荐）
-dsh plugin --profile web add dsh-lead-panel
-
-# 从 GitHub 安装（想跟 main 分支最新代码走就用这条）
+# 从 GitHub 安装（推荐；想跟 main 分支最新代码走就用这条）
 dsh plugin --profile web add github:mutoharohfiqhiabcd-source/dsh-lead-panel
+
+# 从 npm 安装（包在 2026-10-13 被整包撤下，npm 有 24 小时冷却；
+# 2026-10-14 23:26 之后可用）
+dsh plugin --profile web add dsh-lead-panel
 
 # 从本地目录安装
 dsh plugin --profile web add D:\1231\dsh-lead-panel
@@ -134,7 +135,7 @@ dsh plugin --profile web add D:\1231\dsh-lead-panel
 #          name: dsh-lead-panel
 ```
 
-npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 三种装法装的是同一份
+npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种装法装的是同一份
 代码，装完都要**重启 DSH** 才会加载 Host 半边。
 
 `patchReload: live` 的 profile 会在 patch 变化时热重载；否则重启 DSH。
