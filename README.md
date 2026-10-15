@@ -37,7 +37,7 @@ DSH 网页版的「领导面板」插件：在输入框的**「完全权限」�
 按下去弹出对话框，你和「领导」聊需求 —— 聊完让它总结并派活，运行期间实时显示
 token、估算金额、用时和预计剩余时间。
 
-当前版本 **0.5.1** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 30 项 + Host 冒烟 29 项全过 ｜ 依赖官方 Agent Teams（实验性）
+当前版本 **0.5.2** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 30 项 + Host 冒烟 29 项全过 ｜ 依赖官方 Agent Teams（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -135,12 +135,11 @@ DSH 自带的「智能体团队」面板列出每个成员与状态（谁是当�
 ## 安装
 
 ```powershell
-# 从 GitHub 安装（推荐；想跟 main 分支最新代码走就用这条）
-dsh plugin --profile web add github:mutoharohfiqhiabcd-source/dsh-lead-panel
-
-# 从 npm 安装（包在 2026-10-13 被整包撤下，npm 有 24 小时冷却；
-# 2026-10-14 23:26 之后可用）
+# 从 npm 安装（推荐）
 dsh plugin --profile web add dsh-lead-panel
+
+# 从 GitHub 安装（想跟 main 分支最新代码走就用这条）
+dsh plugin --profile web add github:mutoharohfiqhiabcd-source/dsh-lead-panel
 
 # 从本地目录安装
 dsh plugin --profile web add D:\1231\dsh-lead-panel
