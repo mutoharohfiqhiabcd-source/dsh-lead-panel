@@ -1,5 +1,34 @@
 # 更新说明
 
+## v0.6.0 — 把活派给官方 Codex / Claude Code
+
+> 一句话：面板多了「工人来源」，领导可以直接把活交给真正的 **Codex** 或 **Claude Code**，
+> 而不再只能派给 Agent Teams 里现造的工人。
+
+### 新增
+
+- **「工人来源」四选一**：`官方团队` / `Codex` / `Claude Code` / `自动选`，选中项记在 Host
+  状态里（`<DSH_HOME>\lead-panel\state.json`），下次打开面板还是它。
+- **派活指令按来源区分**：`dispatch` 接口新增 `harness` 参数；`team` 仍走 `spawn_teammate`，
+  `codex` / `claude-code` 则要求领导只调一次官方工具（`subagent_codex` / `subagent_claude_code`），
+  并把任务写全（外部 harness 是单次任务、不会反问）。
+- **外部工人实时显示**：从会话事件里的 `tool/call` + `tool/result` 还原 Codex / Claude Code
+  的运行记录 —— 工人区出现带「外部」标记的卡片，状态 running → done / failed，跑完显示它的
+  最终答复；`/state` 同时在 `harnesses` 里给出每个来源是否可用（读 `ctx.subagents.list()`）。
+- **可用性置灰**：没装官方提供方的来源会置灰并提示，不会让人点了个寂寞。
+- `/health` 增加 `subagents` 服务与提供方列表、build 标记更新到 `2026-10-22T14:10`。
+
+### 能力来源（重要）
+
+`subagent_codex` / `subagent_claude_code` 是 **DSH 官方 subagent 提供方包**暴露的工具，
+本插件不实现任何 harness 逻辑：它只生成派活指令、并在面板上把过程还原出来。
+装法与限制见 README 的「把活派给 Codex / Claude Code」一节（需要把官方包 link 进 profile、
+在 preset 里启用工具行；Claude Code 需先在本机登录一次）。
+
+### 自检
+
+- `self-check` 49 项、`host-smoke` 47 项，全绿。
+
 ## v0.5.2 — 首次在 npm 上架
 
 代码与 0.5.0 / 0.5.1 完全一致，只是终于发到了 npm。

@@ -35,18 +35,51 @@ const STATE_VERSION = 1
 const MAX_MESSAGES = 40
 const WORKER_TEXT_LIMIT = 240
 
-/** 派活指令：约束领导按四段回答，并真的把活派下去。 */
-const DISPATCH_INSTRUCTION = `你现在是指挥层的「领导」。请严格按下面四段用中文回答，不要写第四段之外的内容，回答完立刻用 spawn_teammate 把工作派给工人 AI（名字用 lower-kebab-case，prompt 写清验收标准）：
+/**
+ * 外部 harness：官方 subagent 提供方（Codex / Claude Code）暴露给模型的工具名。
+ * 它们由 DSH 官方包实现，本插件只负责「把活派过去 + 把过程显示出来」。
+ */
+const EXTERNAL_HARNESSES = [
+  { id: 'codex', label: 'Codex', tool: 'subagent_codex', provider: 'codex' },
+  { id: 'claude-code', label: 'Claude Code', tool: 'subagent_claude_code', provider: 'claude-code' },
+]
+const EXTERNAL_BY_TOOL = new Map(EXTERNAL_HARNESSES.map(item => [item.tool, item]))
+/** 面板可选的全部「工人来源」。team = 官方 Agent Teams；auto = 让领导自己挑。 */
+const HARNESS_MODES = [
+  { id: 'team', label: '官方团队' },
+  ...EXTERNAL_HARNESSES.map(({ id, label }) => ({ id, label })),
+  { id: 'auto', label: '自动选' },
+]
+
+/** 四段式回答的统一约束（抽出问题、效果、分工与时间，面板才能渲染计划卡）。 */
+const PLAN_SPEC = `你现在是指挥层的「领导」。请先严格按下面四段用中文回答（只写这四段），然后在同一回合里把工作派出去：
 
 【需求】用户到底要什么（一句话）
 【效果】做完之后用户能看到什么
-【分工】每个工人 AI 的名字 + 它负责什么 + 预计耗时，一行一个
+【分工】谁去干 + 它负责什么 + 预计耗时，一行一个
 【预计时间】整件事大概要多久
-
-派活要求：每个工人只做一件边界清晰的事；能并行就并行；工人之间不要重叠改同一个文件。
-
-用户的原始需求如下：
 `
+
+/** 派活方式说明：不同「工人来源」对应不同的官方能力。 */
+const HARNESS_RULES = {
+  team: `
+派活要求：用 spawn_teammate 给每个工人起名字（lower-kebab-case），prompt 写清验收标准；每个工人只做一件边界清晰的事；能并行就并行；工人之间不要重叠改同一个文件。`,
+  codex: `
+派活要求：这段工作只有一个执行者——官方 Codex（工具名 \`subagent_codex\`）。四段写完立刻调用一次 \`subagent_codex\`，用它的 prompt 把任务写全：目标、要改的文件/目录、验收标准、做完怎么验证。Codex 是单次任务、不会反问，所以它需要的信息必须一次给全。工具返回后，用一两句话向用户汇报它的最终结果；不要调用 spawn_teammate，也不要再把同样的活派给别人。`,
+  'claude-code': `
+派活要求：这段工作只有一个执行者——官方 Claude Code（工具名 \`subagent_claude_code\`）。四段写完立刻调用一次 \`subagent_claude_code\`，用它的 prompt 把任务写全：目标、要改的文件/目录、验收标准、做完怎么验证。Claude Code 是单次任务、不会反问，所以它需要的信息必须一次给全。工具返回后，用一两句话向用户汇报它的最终结果；不要调用 spawn_teammate，也不要再把同样的活派给别人。`,
+  auto: `
+派活要求：你自己判断用哪种官方执行方式，只选一种：① 代码改动、命令行、跑构建/测试 → \`subagent_codex\`；② 大段文本重构、审阅、写文档、需要长上下文 → \`subagent_claude_code\`；③ 任务能拆成多个人并行 → 用 spawn_teammate 组队。外部 harness 是单次任务、不会反问，prompt 要一次写全目标/文件/验收标准；工具返回后向用户汇报最终结果。`,
+}
+
+/**
+ * 生成一版派活指令。
+ * @param {string} harness 工人来源：team / codex / claude-code / auto
+ */
+function dispatchInstruction(harness) {
+  const mode = HARNESS_MODES.find(item => item.id === harness) ?? HARNESS_MODES[0]
+  return `${PLAN_SPEC}${HARNESS_RULES[mode.id]}\n\n用户的原始需求如下：\n`
+}
 
 /**
  * 默认价目表：元 / 百万 token。
@@ -160,6 +193,7 @@ function services(ctx) {
     sessions: service(ctx, 'sessions'),
     agents: service(ctx, 'agents'),
     teams: service(ctx, 'agentTeams'),
+    subagents: service(ctx, 'subagents'),
   }
 }
 
@@ -268,6 +302,71 @@ function readMessages(session, limit) {
   return readMessagesFromEvents(events, limit)
 }
 
+/** 解析工具调用的 arguments（模型给的是 JSON 字符串）；坏数据当空对象，绝不让面板崩。 */
+function parseToolArguments(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 从领导会话事件里还原「外部 harness」的运行记录。
+ *
+ * DSH 把每次工具调用写成 `tool/call`（含 callId、name、arguments），
+ * 结果写成 `tool/result`（同一 callId）；Codex / Claude Code 由官方 subagent
+ * 提供方执行，最终答案就在 tool/result 的文本块里。
+ * 于是面板不依赖额外服务，就能显示「派给了谁、干完没有、最终说了什么」。
+ *
+ * @param events 会话事件
+ * @param limit 最多显示最近几次
+ */
+function externalWorkersFromEvents(events, limit = 8) {
+  if (!Array.isArray(events)) return []
+  const results = new Map()
+  for (const event of events) {
+    if (!event || event.type !== 'tool/result') continue
+    const callId = event.data?.message?.source?.callId
+    if (callId === undefined || callId === null) continue
+    results.set(String(callId), event)
+  }
+  const workers = []
+  for (const event of events) {
+    if (!event || event.type !== 'tool/call') continue
+    const named = EXTERNAL_BY_TOOL.get(event.data?.name)
+    if (!named) continue
+    const callId = String(event.data?.callId ?? `${named.id}-${workers.length}`)
+    const args = parseToolArguments(event.data?.arguments)
+    const result = results.get(callId)
+    const isError = Boolean(result?.data?.message?.isError ?? result?.data?.isError)
+    const answer = result ? textOf(result.data?.message?.content) : ''
+    const description = typeof args.description === 'string' ? args.description : ''
+    const prompt = typeof args.prompt === 'string' ? args.prompt : ''
+    workers.push({
+      name: named.label,
+      id: callId,
+      external: true,
+      harness: named.id,
+      status: result ? (isError ? 'failed' : 'done') : 'running',
+      description,
+      prompt: prompt.slice(0, WORKER_TEXT_LIMIT),
+      provider: null,
+      model: null,
+      parent: null,
+      diagnostics: [],
+      usage: null,
+      cost: 0,
+      // 跑完显示 Codex / Claude Code 的最终答案；还在跑就显示这一步在做什么。
+      lastText: (result ? answer : description || prompt).slice(0, WORKER_TEXT_LIMIT),
+      done: Boolean(result),
+    })
+  }
+  return workers.slice(-limit)
+}
+
 /**
  * 从最后一条「四段式」回复里抽出计划：需求 / 效果 / 分工 / 预计时间。
  * 领导按派活指令回答时会带这四个方括号小标题，抽出来面板就能用卡片渲染。
@@ -360,7 +459,7 @@ function usageIsEmpty(usage) {
  * @returns `{ usage, messages, live }`；读不到就是 `usage: null`。
  */
 async function readSessionUsage(ctx, s, sessionId) {
-  if (!sessionId) return { live: false, usage: null, messages: [] }
+  if (!sessionId) return { live: false, usage: null, messages: [], events: [] }
   const live = s.sessions?.get?.(sessionId) ?? null
   if (live) {
     let events = []
@@ -371,20 +470,26 @@ async function readSessionUsage(ctx, s, sessionId) {
       live: true,
       usage: usageIsEmpty(projected) ? folded : projected,
       messages: readMessages(live, 200),
+      events,
     }
   }
   const persistence = service(ctx, 'sessionPersistence')
-  if (!persistence) return { live: false, usage: null, messages: [] }
+  if (!persistence) return { live: false, usage: null, messages: [], events: [] }
   try {
     const handle = await persistence.open(sessionId, 'read')
     try {
       const { events } = await handle.read(0, undefined)
-      return { live: false, usage: foldUsage(events), messages: readMessagesFromEvents(events, 200) }
+      return {
+        live: false,
+        usage: foldUsage(events),
+        messages: readMessagesFromEvents(events, 200),
+        events: events ?? [],
+      }
     } finally {
       await handle.close()
     }
   } catch {
-    return { live: false, usage: null, messages: [] }
+    return { live: false, usage: null, messages: [], events: [] }
   }
 }
 
@@ -449,35 +554,38 @@ function modelSelectionOf(projections, session) {
 }
 
 /**
- * 领导的工人们：Agent Teams 名册 + 每人自己的用量、最后一句结论。
+ * 领导的工人们：Agent Teams 名册 + 外部 harness 运行记录，各带自己的用量和最后一句结论。
  * worker 干完活会被卸载，所以这里对每个工人走一遍「活会话优先、否则读持久日志」，
  * 这样它 settle 之后面板仍然能看到它花了多少 token、做了什么。
+ * 外部 harness（Codex / Claude Code）不返回用量，只给「过程 + 最终答案」。
  */
-async function collectWorkers(ctx, s, leadAgent, options) {
-  if (!s.teams || !leadAgent) return []
-  let members = []
-  try { members = s.teams.listMembers(leadAgent) ?? [] } catch { return [] }
+async function collectWorkers(ctx, s, leadAgent, options, leadRead) {
   const workers = []
-  for (const member of members) {
-    if (member.role !== 'teammate') continue
-    const read = await readSessionUsage(ctx, s, member.id)
-    const lastLead = [...read.messages].reverse().find(message => message.role === 'lead' && message.text.trim())
-    const model = member.model ?? null
-    workers.push({
-      name: member.name,
-      id: member.id,
-      status: member.status,
-      description: member.description ?? '',
-      provider: member.provider ?? null,
-      model,
-      parent: member.parent ?? null,
-      diagnostics: member.diagnostics ?? [],
-      usage: read.usage,
-      cost: costOf(read.usage, priceOf(options, model ?? '')),
-      lastText: lastLead ? lastLead.text.slice(0, WORKER_TEXT_LIMIT) : '',
-      done: member.status !== 'running' && Boolean(lastLead),
-    })
+  if (s.teams && leadAgent) {
+    let members = []
+    try { members = s.teams.listMembers(leadAgent) ?? [] } catch { members = [] }
+    for (const member of members) {
+      if (member.role !== 'teammate') continue
+      const read = await readSessionUsage(ctx, s, member.id)
+      const lastLead = [...read.messages].reverse().find(message => message.role === 'lead' && message.text.trim())
+      const model = member.model ?? null
+      workers.push({
+        name: member.name,
+        id: member.id,
+        status: member.status,
+        description: member.description ?? '',
+        provider: member.provider ?? null,
+        model,
+        parent: member.parent ?? null,
+        diagnostics: member.diagnostics ?? [],
+        usage: read.usage,
+        cost: costOf(read.usage, priceOf(options, model ?? '')),
+        lastText: lastLead ? lastLead.text.slice(0, WORKER_TEXT_LIMIT) : '',
+        done: member.status !== 'running' && Boolean(lastLead),
+      })
+    }
   }
+  workers.push(...externalWorkersFromEvents(leadRead?.events))
   return workers
 }
 
@@ -490,11 +598,19 @@ async function collectState(ctx, options) {
   const leadAgent = sessionId ? (s.agents?.get?.(sessionId) ?? null) : null
   const running = leadAgent?.status === 'running' || Boolean(session?.status === 'running')
 
+  /** 已注册的外部 harness 提供方（Codex / Claude Code 由官方包注册到 ctx.subagents）。 */
+  const providerNames = new Set((() => {
+    try { return s.subagents?.list?.() ?? [] } catch { return [] }
+  })())
+  const savedHarness = typeof state.harness === 'string' && HARNESS_MODES.some(item => item.id === state.harness)
+    ? state.harness
+    : 'team'
+
   const messages = session ? readMessages(session, MAX_MESSAGES) : []
-  const workers = await collectWorkers(ctx, s, leadAgent, options)
   const models = await listModels(s)
 
   const leadRead = await readSessionUsage(ctx, s, sessionId)
+  const workers = await collectWorkers(ctx, s, leadAgent, options, leadRead)
   const leadUsage = leadRead.usage
   const leadStats = statsOf(s.projections, session)
   let usage = addUsage(null, leadUsage)
@@ -526,6 +642,20 @@ async function collectState(ctx, options) {
     sessionTitle: state.title ?? options.title,
     running,
     model: modelSelectionOf(s.projections, session),
+    harnesses: HARNESS_MODES.map(mode => {
+      const external = EXTERNAL_HARNESSES.find(item => item.id === mode.id)
+      return {
+        id: mode.id,
+        label: mode.label,
+        tool: external?.tool ?? null,
+        available: mode.id === 'team'
+          ? Boolean(s.teams)
+          : mode.id === 'auto'
+            ? Boolean(s.teams) || EXTERNAL_HARNESSES.some(item => providerNames.has(item.provider))
+            : providerNames.has(external?.provider ?? ''),
+      }
+    }),
+    dispatchHarness: savedHarness,
     models,
     messages,
     plan: extractPlan(messages),
@@ -580,10 +710,11 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-10-09T19:40',
+              build: '2026-10-22T14:10',
               route: options.route,
               statePath: statePath(),
               state: readState(),
+              harnesses: HARNESS_MODES.map(mode => mode.id),
               services: {
                 sessionController: Boolean(s.controller),
                 llm: Boolean(s.llm),
@@ -591,6 +722,8 @@ function createApiHandler(ctx, options) {
                 sessions: Boolean(s.sessions),
                 agents: Boolean(s.agents),
                 agentTeams: Boolean(s.teams),
+                subagents: Boolean(s.subagents),
+                subagentsProviders: (() => { try { return s.subagents?.list?.() ?? [] } catch { return [] } })(),
                 sessionPersistence: Boolean(service(ctx, 'sessionPersistence')),
               },
             },
@@ -640,10 +773,13 @@ function createApiHandler(ctx, options) {
         case 'dispatch': {
           const body = await readJsonBody(req)
           const need = String(body.text ?? '').trim()
-          const text = `${DISPATCH_INSTRUCTION}${need || '(见上文)'}`
+          const requested = String(body.harness ?? '').trim()
+          const harness = requested || readState().harness || 'team'
+          if (!HARNESS_MODES.some(item => item.id === harness)) throw new Error(`未知的工人来源：${harness}`)
+          const text = `${dispatchInstruction(harness)}${need || '(见上文)'}`
           const result = await sendToLead(ctx, options, text)
-          writeState({ jobStartedAt: Date.now() })
-          sendJson(res, 200, { ok: true, data: result })
+          writeState({ jobStartedAt: Date.now(), harness })
+          sendJson(res, 200, { ok: true, data: { ...result, harness } })
           return
         }
         case 'model': {
@@ -693,6 +829,11 @@ export const internals = {
   textOf,
   callsOf,
   priceOf,
+  dispatchInstruction,
+  externalWorkersFromEvents,
+  parseToolArguments,
+  HARNESS_MODES,
+  EXTERNAL_HARNESSES,
 }
 
 export function apply(ctx, config) {

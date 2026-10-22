@@ -33,7 +33,8 @@ function checkTrue(name, value) {
 const { internals } = await import(`file://${join(root, 'index.js').replace(/\\/g, '/')}`)
 const {
   foldUsage, usageIsEmpty, extractPlan, costOf, addUsage, readMessagesFromEvents,
-  normalizeConfig, priceOf,
+  normalizeConfig, priceOf, dispatchInstruction, externalWorkersFromEvents, parseToolArguments,
+  HARNESS_MODES,
 } = internals
 
 // ── 1) 用量折叠：四个桶互不重叠，按事件累加 ─────────────────────────────────
@@ -99,7 +100,32 @@ check('价目表可覆盖', priceOf(options, 'my-model'), { input: 9, cacheRead:
 checkTrue('未知模型走默认牌价', priceOf(options, '未知模型').input === 2)
 check('默认 route', options.route, '/lead-panel/api')
 
-// ── 6) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
+// ── 6) 工人来源与外部 harness（Codex / Claude Code）───────────────────────
+check('工人来源四种模式', HARNESS_MODES.map(item => item.id), ['team', 'codex', 'claude-code', 'auto'])
+checkTrue('团队指令用 spawn_teammate', dispatchInstruction('team').includes('spawn_teammate'))
+checkTrue('codex 指令点名 subagent_codex', dispatchInstruction('codex').includes('subagent_codex'))
+checkTrue('codex 指令明确不组队', dispatchInstruction('codex').includes('不要调用 spawn_teammate'))
+checkTrue('claude 指令点名 subagent_claude_code', dispatchInstruction('claude-code').includes('subagent_claude_code'))
+checkTrue('未知来源回退官方团队', dispatchInstruction('nope').includes('spawn_teammate'))
+check('四种来源都带四段格式', HARNESS_MODES.every(mode =>
+  dispatchInstruction(mode.id).includes('【需求】') && dispatchInstruction(mode.id).includes('【预计时间】')), true)
+
+const harnessEvents = [
+  { type: 'tool/call', seq: 1, data: { callId: 'c1', name: 'subagent_codex', arguments: JSON.stringify({ description: '改 README', prompt: '把安装节改成三步' }) } },
+  { type: 'tool/call', seq: 2, data: { callId: 'c2', name: 'subagent_claude_code', arguments: '{"description":"审阅","prompt":"帮我审阅 README 的语气"}' } },
+  { type: 'tool/result', seq: 3, data: { message: { source: { callId: 'c2' }, content: [{ type: 'text', text: '语气已更口语化' }] } } },
+  { type: 'tool/call', seq: 4, data: { callId: 'c3', name: 'read', arguments: '{}' } },
+]
+const externalWorkers = externalWorkersFromEvents(harnessEvents)
+check('外部 harness 只认官方两种工具', externalWorkers.map(item => item.harness), ['codex', 'claude-code'])
+check('未返回 = 运行中', externalWorkers[0].status, 'running')
+check('已返回 = 完成', externalWorkers[1].status, 'done')
+checkTrue('运行中显示这一步做什么', externalWorkers[0].lastText.includes('改 README'))
+checkTrue('完成后显示最终答案', externalWorkers[1].lastText.startsWith('语气已更口语化'))
+check('外部 harness 不占 token', externalWorkers.map(item => item.usage), [null, null])
+check('坏 arguments 当空对象', parseToolArguments('{oops'), {})
+
+// ── 7) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
 const clientSource = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 let registration = null
 const fakeWindow = { __ModuleLoader__: { load: (entry) => { registration = entry } } }
@@ -138,12 +164,18 @@ checkTrue('槽位 order 是数字', typeof slotOptions.order === 'number')
 checkTrue('拿到组件', typeof component === 'function')
 checkTrue('组件带 notranslate（防 Chrome 翻译）', clientSource.includes('notranslate'))
 
-// ── 7) 模型下拉：不再用原生 select，且能区分同名模型 ───────────────────────
+// ── 8) 模型下拉：不再用原生 select，且能区分同名模型 ───────────────────────
 checkTrue('模型选择器是自定义下拉', clientSource.includes('lp-model') && clientSource.includes('lp-menu-item'))
 checkTrue('下拉里有分组标题与当前项打勾', clientSource.includes('lp-menu-group') && clientSource.includes('lp-menu-check'))
 checkTrue('不再使用原生 select（深色主题下看不清）', !/<select/.test(clientSource))
 checkTrue('provider 展示名与模型名分开渲染', clientSource.includes('lp-model-provider') && clientSource.includes('lp-model-value'))
 checkTrue('显示推理强度（reasoningEffort）', clientSource.includes('lp-model-effort') && clientSource.includes('reasoningEffort'))
+
+// ── 9) 工人来源选择器与外部工人样式 ────────────────────────────────────────
+checkTrue('工人来源选择器', clientSource.includes('lp-harness') && clientSource.includes('lp-seg'))
+checkTrue('派活时把来源发给 Host', clientSource.includes('harness: selectedHarness'))
+checkTrue('外部工人带「外部」标记', clientSource.includes('externalTag') && clientSource.includes('lp-tag'))
+checkTrue('来源不可用时给提示', clientSource.includes('harnessNoProvider'))
 
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)

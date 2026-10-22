@@ -12,8 +12,11 @@
 
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+// 别把测试会话写进真实的 ~/.dsh/lead-panel/state.json（否则会把正在用的面板切走）
+process.env.DSH_HOME = join(tmpdir(), 'dsh-lead-panel-smoke-home')
 
 let failures = 0
 function check(name, actual, expected) {
@@ -53,6 +56,17 @@ const leadEvents = [
       },
       usage: { inputTokens: '2000', cacheReadTokens: 0, outputTokens: 300 },
     },
+  },
+  // 外部 harness：Codex 的一次运行（tool/call + tool/result）
+  {
+    type: 'tool/call',
+    time: 4,
+    data: { turn: 1, step: 1, callId: 'call-codex-1', name: 'subagent_codex', arguments: JSON.stringify({ description: '重写安装节', prompt: '把 README 安装节改成三步' }) },
+  },
+  {
+    type: 'tool/result',
+    time: 5,
+    data: { message: { source: { callId: 'call-codex-1' }, content: [{ type: 'text', text: 'README 安装节已重写为三步' }] } },
   },
 ]
 
@@ -113,6 +127,8 @@ const ctx = {
         close: async () => {},
       }),
     },
+    // 官方 Codex / Claude Code 提供方已注册（面板据此点亮「工人来源」）
+    subagents: { list: () => ['spawn', 'fork', 'codex', 'claude-code'] },
   })[name] ?? null,
 }
 
@@ -141,7 +157,8 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-10-09T19:40')
+check('health 带 build 标记', health.body.data.build, '2026-10-22T14:10')
+checkTrue('health 报出 subagents 提供方', health.body.data.services.subagentsProviders.includes('codex'))
 checkTrue('health 报出持久化服务可用', health.body.data.services.sessionPersistence)
 
 // /send 必须把 signal 传给 prompt（旧代码就是漏了这个才报 throwIfAborted）
@@ -155,6 +172,18 @@ const dispatched = await request('POST', 'dispatch', { text: '把 README 弄好'
 check('dispatch 200', dispatched.status, 200)
 checkTrue('dispatch 用的是固定四段指令', prompts.at(-1).request.content[0].text.includes('【需求】'))
 checkTrue('dispatch 带上用户需求', prompts.at(-1).request.content[0].text.includes('把 README 弄好'))
+checkTrue('dispatch 默认用官方团队', prompts.at(-1).request.content[0].text.includes('spawn_teammate'))
+
+// 派给外部 harness：指令里必须点名官方工具，并且不再让领导 spawn_teammate
+const codexDispatch = await request('POST', 'dispatch', { text: '重写安装节', harness: 'codex' })
+check('dispatch 指定 codex 200', codexDispatch.status, 200)
+check('dispatch 回显来源', codexDispatch.body.data.harness, 'codex')
+checkTrue('codex 指令点名 subagent_codex', prompts.at(-1).request.content[0].text.includes('subagent_codex'))
+checkTrue('codex 指令明确不组队', prompts.at(-1).request.content[0].text.includes('不要调用 spawn_teammate'))
+
+const badDispatch = await request('POST', 'dispatch', { text: 'x', harness: 'nope' })
+check('未知工人来源 500', badDispatch.status, 500)
+checkTrue('未知工人来源报错', String(badDispatch.body.error).includes('未知的工人来源'))
 
 const modeled = await request('POST', 'model', { provider: 'deepseek-official', model: 'deepseek-v4-pro' })
 check('model 200', modeled.status, 200)
@@ -166,19 +195,30 @@ const data = state.body.data
 check('state 消息只留对话（过滤运行时注入）', data.messages.map(m => m.role), ['user', 'lead', 'lead'])
 check('state 抓到计划卡片', [data.plan.need, data.plan.effect, data.plan.eta], ['写清安装步骤', '新人三步装好', '10 分钟'])
 checkTrue('state 计划分工含两个工人', data.plan.split.includes('readme-writer') && data.plan.split.includes('link-checker'))
-check('state 工人数', data.workers.length, 2)
+check('state 工人数', data.workers.length, 3)
 check('state 活工人用量来自投影', data.workers[0].usage.outputTokens, 120)
 check('state 卸载工人用量来自持久日志', data.workers[1].usage, { uncachedInputTokens: 400, cacheReadTokens: 100, cacheWriteTokens: 0, outputTokens: 80 })
 checkTrue('字符串计数被强制转成数字（不是拼接）', data.workers[1].usage.uncachedInputTokens === 400 && typeof data.workers[1].usage.uncachedInputTokens === 'number')
 check('state 卸载工人最后一句结论', data.workers[1].lastText.startsWith('链接检查完成'), true)
 check('state 工人标记完成', data.workers[1].done, true)
+// 外部 harness：从 tool/call + tool/result 还原，不计 token
+check('state 外部工人来自 Codex', [data.workers[2].external, data.workers[2].harness], [true, 'codex'])
+check('state 外部工人状态', data.workers[2].status, 'done')
+check('state 外部工人最终答案', data.workers[2].lastText.startsWith('README 安装节已重写'), true)
+check('state 外部工人不算 token', data.workers[2].usage, null)
+check('state 外部工人标记完成', data.workers[2].done, true)
+// 工人来源：四种模式，官方提供方已注册 → Codex / Claude Code 可用
+check('state 工人来源列表', data.harnesses.map(item => item.id), ['team', 'codex', 'claude-code', 'auto'])
+check('state Codex 可用', data.harnesses.find(item => item.id === 'codex').available, true)
+check('state Claude Code 可用', data.harnesses.find(item => item.id === 'claude-code').available, true)
+check('state 记住上次派活来源', data.dispatchHarness, 'codex')
 // 领导 3000/9000/0/800 + 活工人 300/0/0/120 + 冷工人 400/100/0/80 = 13800
 check('state token 合计', data.tokens ?? data.usage.tokens, 13800)
 // 牌价 deepseek-flash: 未命中 2 / 命中 0.2 / 输出 3（元每百万）
 const expectedCost = (3700 * 2 + 9100 * 0.2 + 1000 * 3) / 1_000_000
 check('state 金额估算', Math.abs(data.usage.cost - expectedCost) < 1e-9, true)
 check('state 速度（tok/s）', Math.round(data.usage.tokensPerSecond), 200)
-check('state 进度', data.progress, { done: 1, total: 2 })
+check('state 进度', data.progress, { done: 2, total: 3 })
 
 const debug = await request('GET', 'debug-session', undefined, `?id=${WORKER_COLD}`)
 check('debug-session 读到冷会话事件数', debug.body.data.assistantMessages, 1)
