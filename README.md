@@ -50,7 +50,7 @@ token、估算金额、用时和预计剩余时间。
 模型，选一下就能换（下一条回复生效），旁边还有「打开 Codex」「配置」两个按钮——
 一键进它自己的界面，或直接改它的配置文件。
 
-当前版本 **0.9.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 96 项 + Host 冒烟 92 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+当前版本 **0.9.1** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 96 项 + Host 冒烟 92 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 

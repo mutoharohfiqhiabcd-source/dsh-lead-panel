@@ -1,7 +1,7 @@
 {
   "name": "dsh-lead-panel",
-  "version": "0.9.0",
-  "description": "DSH 领导面板：领导可在 DSH 官方 / 官方 Codex（GPT）/ Claude Code 之间切换，外部 harness 的模型直接在面板里换、一键打开它自己的界面或配置；支持单平台、跨平台分工、同题会诊、跨平台流水线四种协作模式，并实时显示 token/金额/用时。团队与 harness 能力都来自官方，本插件只做面板",
+  "version": "0.9.1",
+  "description": "在 DSH 输入框旁加一个「领导」按钮：领导可在 DSH 官方 / Codex / Claude Code 之间切换，模型直接换、平台一键打开；单平台 / 分工 / 会诊 / 流水线四种协作模式，实时看 token、金额与用时。团队与 harness 能力都来自 DSH 官方，插件只做面板。",
   "keywords": [
     "dsh",
     "dsh-plugin",
