@@ -46,7 +46,11 @@ token、估算金额、用时和预计剩余时间。
 **还能跨平台干活**：顶部的「协作模式」有 `单平台` / `分工` / `会诊` / `流水线` 四种 ——
 同一个任务可以拆给多个平台分工、同时发给多个平台各答一遍对比、或按顺序接力处理。
 
-当前版本 **0.8.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 72 项 + Host 冒烟 76 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+**外部领导的模型也能直接换**：切到 Codex / Claude Code 当领导时，面板会读出它自己配置里的
+模型，选一下就能换（下一条回复生效），旁边还有「打开 Codex」「配置」两个按钮——
+一键进它自己的界面，或直接改它的配置文件。
+
+当前版本 **0.9.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 96 项 + Host 冒烟 92 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -60,6 +64,7 @@ token、估算金额、用时和预计剩余时间。
 | 面板区域 | 内容 |
 |---|---|
 | 顶部 | 领导当前状态（运行中 / 空闲）、**「领导平台」切换**（DSH 官方 / Codex / Claude Code，见下一节）、**模型下拉框**（列出本机所有 provider/模型，按 provider 分组、模型全名、当前项打勾，选一下即切换），并常显当前模型 + provider 胶囊 + 推理强度；另有打断、重开 |
+| 领导模型 | **只在外部 harness 当领导时出现**：它自己的配置里的模型 + `换模型` + `打开 <平台>` + `配置`，见「换外部领导的模型」那一节 |
 | 领导平台 | `DSH 官方` / `Codex（GPT）` / `Claude Code` 三选一。DSH 官方是普通会话（模型可切、能组队派活）；外部 harness 让它自己当领导，每轮带着对话历史跑一次，派活 = 直接动手 |
 | 协作模式 | `单平台` / `分工` / `会诊` / `流水线` 四选一，下面跟着一句说明；非单平台模式会出现「参与平台」多选（DSH 官方 / Codex / Claude Code），结果区按平台列出状态、耗时与答复 |
 | 工人来源 | `官方团队` / `Codex` / `Claude Code` / `自动选` 四选一。没装官方提供方的来源会置灰，鼠标悬停有提示；选择记在 Host 里，下次打开面板还是它 |
@@ -249,10 +254,10 @@ DSH 官方本来就带两个 subagent 提供方包：
 
 ### 多挂几个「人」
 
-Codex / Claude Code 各自的模型由它们的 profile 行决定（`@deepseek-ai/dsh-subagent-codex` 的
-`model` 配置）。想要面板里出现「Codex · GPT-5.1」「Codex · GPT-5.4」这种多人可选，就在 profile
-里多挂几个 provider 实例（每个用不同的 `providerName` + `model`），它们会各占一个「领导平台」格；
-展示名用插件配置 `leaders` 覆盖：
+> 0.9.0 起不用这么麻烦了：直接在面板的「领导模型」里换即可（读写它自己的原生配置，见下一节）。
+> 下面这种做法留给「一台机器上想同时挂几个**写死了模型**的 Codex 实例」：provider 行里写的
+> `model` 优先级高于原生配置，多挂几个 provider（不同 `providerName` + `model`）就会各占一个
+> 「领导平台」格，展示名用插件配置 `leaders` 覆盖：
 
 ```yaml
 - id: dsh-lead-panel
@@ -281,6 +286,41 @@ Codex / Claude Code 各自的模型由它们的 profile 行决定（`@deepseek-a
 - 结果区显示每个平台的状态、耗时和最终答复；跑完会存进状态文件，面板刷新后还在（「重开」会清掉）。
 - 外部平台仍由官方 subagent 提供方执行、不回传 token，所以 token / 金额只统计 DSH 自己的部分。
 - **分工模式要求领导是 `DSH 官方`**（只有它手里有 Agent Teams 和 harness 工具）；会诊、流水线不限制领导平台。
+
+## 换外部领导的模型 + 一键打开它（0.9.0 新增）
+
+> 一句话：外部 harness 的模型不再只是「由它自己定」四个字 —— 面板直接读它自己的配置、
+> 给你换，还能一键打开它本人或它的配置文件。
+
+![外部领导：Codex 的原生模型、换模型、打开 Codex、打开配置](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-harness-model.png)
+
+外部 harness（Codex / Claude Code）当领导时，顶部多出这一行：
+
+| 控件 | 作用 |
+|---|---|
+| 模型胶囊 | 显示**它现在真正在用的模型**（读自它自己的配置文件），点一下是快捷下拉 |
+| `换模型` | 下拉里选，或手动输入模型 id；写进它自己的配置，**下一条领导回复就生效**，DSH 不用重启 |
+| `打开 Codex` / `打开 Claude Code` | 新开一个终端窗口跑它的 CLI（在里面还能用 `/model` 等原生命令） |
+| `配置` | 用记事本打开它的配置文件 |
+
+模型从哪来：
+
+| 平台 | 配置文件 | 字段 |
+|---|---|---|
+| Codex | `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`） | `model`；快捷选项读 `model_catalog_json` 指向的模型目录 |
+| Claude Code | `~/.claude/settings.json` | `model`（留空 = 用它自己的默认；`sonnet` / `opus` / `haiku` 这类别名也认） |
+
+点模型胶囊就是快捷下拉（Codex 的选项来自它自己的模型目录，当前项打勾）：
+
+![换模型：下拉里就是 Codex 自己的模型目录](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-harness-model-menu.png)
+
+- **只改这一个字段**：写前先把原文件备份成 `<配置文件名>.lead-panel.bak`，provider、MCP、审批模式
+  这些一概不碰；模型 id 只接受字母数字和 `._:/-`，其它内容直接拒绝。
+- 如果 profile 里的 `@deepseek-ai/dsh-subagent-codex` / `-claude-code` 行**写死了 `model`**，那个优先于
+  原生配置 —— 想让面板的「换模型」生效，就别在 profile 里给提供方写 `model`。
+- 工人来源选到 Codex / Claude Code 时，下面也会多一行「工人模型」，同样可换、可打开。
+- 「打开」走 `cmd /c start`，只支持 Windows；接口只认白名单里的平台与动作，且只允许本机访问。
+- 面板仍然只做「读一个字段 / 写一个字段 / 起一个进程」，harness 逻辑还是官方的。
 
 ## 安装
 
@@ -331,7 +371,7 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 领导平台（`leaders`、`leader`、`leaderKind`、`leaderRun`）/ 协作模式（`modes`、`mode`、`platforms`、`picks`、`lastRun`）/ 工人来源（`harnesses`、`dispatchHarness`） |
+| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 领导平台（`leaders`、`leader`、`leaderKind`、`leaderRun`）/ 协作模式（`modes`、`mode`、`platforms`、`picks`、`lastRun`）/ 工人来源（`harnesses`、`dispatchHarness`）/ 外部 harness 原生配置（`harnessApps`：当前模型、模型选项、配置路径、可执行文件） |
 | GET | `/lead-panel/api/health` | 自检：Host 服务可用性（含 `subagents` 提供方列表）、领导平台列表、状态文件位置、build 标记 |
 | GET | `/lead-panel/api/debug-session?id=<会话id>` | 排查：直接读某个会话的持久日志，看能不能算出用量 |
 | POST | `/lead-panel/api/ensure` | 确保领导会话存在（`{reset:true}` 重开；外部 harness 模式下同时清空面板对话记录） |
@@ -342,6 +382,8 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 | POST | `/lead-panel/api/send` | `{text}` 给领导发消息 |
 | POST | `/lead-panel/api/dispatch` | `{text, harness}` 总结并派活；`harness` 取 `team` / `codex` / `claude-code` / `auto`，省略则用上次的选择。领导是外部 harness 时忽略该字段，直接让它动手 |
 | POST | `/lead-panel/api/model` | `{provider, model}` 切换领导模型（仅 DSH 官方领导可用） |
+| POST | `/lead-panel/api/harness-model` | `{platform, model}` 换外部 harness 领导的原生模型：`platform` 取 `codex` / `claude-code`，直接改它自己的配置文件（写前留 `.bak`） |
+| POST | `/lead-panel/api/open` | `{platform, what}` 打开外部平台：`what: app` 新开终端跑它的 CLI，`what: config` 用记事本打开配置文件（仅 Windows、白名单） |
 | POST | `/lead-panel/api/cancel` | 打断领导当前回合 |
 
 领导会话的 id 存在 `<DSH_HOME>\lead-panel\state.json`，重启 DSH 后复用同一个会话。
@@ -350,22 +392,24 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 ```powershell
 npm test                  # 两个套件一起跑
-node test/self-check.mjs  # 72 项：纯逻辑 + 浏览器半边
-node test/host-smoke.mjs  # 76 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
+node test/self-check.mjs  # 96 项：纯逻辑 + 浏览器半边
+node test/host-smoke.mjs  # 92 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
 ```
 
 - `self-check`：用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖、**四种工人来源的派活指令**、
   **从 `tool/call` + `tool/result` 还原外部 harness 工人**、**领导平台列表与外部 harness 的 prompt
-  拼装**、**跨平台三种模式的分工指令 / 会诊 prompt / 流水线交接 prompt**；以及在假
-  `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
-  `conversation.input.left`、组件可构造、防翻译标记在位。
+  拼装**、**跨平台三种模式的分工指令 / 会诊 prompt / 流水线交接 prompt**、
+  **外部 harness 原生模型的读写**（config.toml 替换/插入、settings.json 增删、模型 id 校验、
+  临时 `CODEX_HOME` 下的快照与模型目录）；以及在假 `window.__ModuleLoader__` + 假 `react` 下求值
+  `lib/client.js`，确认它注册到 `conversation.input.left`、组件可构造、防翻译标记在位。
 - `host-smoke`：用假 ctx / 假服务驱动真实处理器，验证 `POST /send`、`/dispatch`
   会给 `sessionController.prompt` 传 `AbortSignal`（曾经漏传，面板点了报
   `throwIfAborted`）、`/dispatch` 按 `harness` 生成不同指令且拒绝未知来源、
   **`/leader` 切换后 `/send`、`/dispatch` 走官方 subagent 提供方并写回对话记录**、
   **`/mode` + `/picks` + `/run` 的会诊（并行）、流水线（串行、交接上一步输出）、分工（要求 DSH 领导）**、
-  `/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志、外部 harness 工人）、
-  金额按牌价折算、异常以 JSON 返回。
+  **`/harness-model` 在临时 `CODEX_HOME` 里真的改掉 `model` 并留 `.bak`、非法 id / 未知平台被拒**、
+  **`/open` 只认白名单**、`/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志、外部
+  harness 工人）、金额按牌价折算、异常以 JSON 返回。
 
 两套都不依赖 DSH，改完先跑。
 
@@ -386,7 +430,12 @@ node test/host-smoke.mjs  # 76 项：假 ctx 把 Host 的 HTTP 链路整条跑�
   下一步的 prompt，会诊则是让各平台独立作答。它们都不会回传 token，金额只覆盖 DSH 自己的部分。
 - **Claude Code 需要本机先登录**：官方包调用的是它自己的 CLI；没登录时每次运行都会以
   `product: Claude Code; stage: query-run; invalid-result` 失败，先在终端跑一次 `claude`
-  完成登录即可（Codex 同理，需要 `~/.codex/auth.json`）。
+  完成登录即可（Codex 同理，需要 `~/.codex/auth.json`）。面板的「打开 Claude Code」按钮就是
+  为这一步准备的。
+- **面板会写外部 harness 的配置文件**（只在你点「换模型」时）：目标是 `~/.codex/config.toml`
+  或 `~/.claude/settings.json`，只改 `model` 一个字段，写前备份成 `*.lead-panel.bak`；
+  「打开平台」用 `cmd /c start` 起独立窗口、不拼 shell 命令，接口只允许本机访问且平台/动作在
+  白名单里。
 - **金额是估算**：DSH 本身只有 token 计数、没有金额模型，所以插件内置一张 DeepSeek
   牌价表（元/百万 token），按 `未命中输入 / 命中输入 / 输出` 三个桶折算；牌价变了改配置即可。
 - **预计剩余时间也是估算**：没有历史时长库，用「已完成工人数 × 已用时长」外推；

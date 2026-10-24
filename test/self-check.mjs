@@ -9,7 +9,8 @@
 // ============================================================================
 
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -36,6 +37,7 @@ const {
   normalizeConfig, priceOf, dispatchInstruction, externalWorkersFromEvents, parseToolArguments,
   HARNESS_MODES, leaderOptions, buildLeaderPrompt, LEADER_DSH, DEFAULT_LEADER_LABELS,
   COLLAB_MODES, normalizePicks, picksOf, dispatchInstructionFor, buildConsultPrompt, buildPipelinePrompt,
+  parseCodexConfig, applyCodexModel, applyClaudeModel, normalizeModelId, harnessAppInfo, HARNESS_APPS,
 } = internals
 
 // ── 1) 用量折叠：四个桶互不重叠，按事件累加 ─────────────────────────────────
@@ -161,7 +163,55 @@ checkTrue('流水线第一步要交接', buildPipelinePrompt('Codex', 1, 2, '任
 checkTrue('流水线后续步带上一步输出', buildPipelinePrompt('Claude Code', 2, 2, '任务', '上一步做了 X').includes('上一步做了 X'))
 check('协作模式四种', COLLAB_MODES.map(mode => mode.id), ['single', 'split', 'consult', 'pipeline'])
 
-// ── 9) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
+// ── 9) 外部 harness 的原生模型：读 / 写它自己的配置文件 ─────────────────────
+const codexToml = `model_provider = "custom"
+model = "deepseek-v4-flash"
+model_reasoning_effort = "high"
+model_catalog_json = "catalog.json"
+
+[model_providers.custom]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+`
+const parsedCodex = parseCodexConfig(codexToml)
+check('parseCodexConfig 读 model/provider/base_url', [parsedCodex.model, parsedCodex.provider, parsedCodex.baseUrl], ['deepseek-v4-flash', 'custom', 'https://api.deepseek.com'])
+check('parseCodexConfig 读模型目录文件', parsedCodex.catalogPath, 'catalog.json')
+check('parseCodexConfig 空文本', parseCodexConfig(''), { model: null, provider: null, baseUrl: null, catalogPath: null })
+const rewritten = applyCodexModel(codexToml, 'deepseek-v4-pro')
+checkTrue('applyCodexModel 换掉 model', rewritten.includes('model = "deepseek-v4-pro"') && !rewritten.includes('model = "deepseek-v4-flash"'))
+checkTrue('applyCodexModel 不动 model_provider', rewritten.includes('model_provider = "custom"'))
+check('applyCodexModel 改完还能读', parseCodexConfig(rewritten).model, 'deepseek-v4-pro')
+checkTrue('applyCodexModel 保留 CRLF', applyCodexModel(codexToml.replace(/\n/gu, '\r\n'), 'x').includes('\r\n'))
+const noModelToml = applyCodexModel('model_provider = "custom"\n\n[model_providers.custom]\n', 'gpt-5')
+check('applyCodexModel 缺 model 时插在 model_provider 后', noModelToml.split(/\r?\n/u)[1], 'model = "gpt-5"')
+check('applyClaudeModel 写 model', JSON.parse(applyClaudeModel('{"env":{}}', 'sonnet')).model, 'sonnet')
+check('applyClaudeModel 空串=删字段', 'model' in JSON.parse(applyClaudeModel('{"env":{},"model":"opus"}', '')), false)
+check('applyClaudeModel 坏 JSON 报错', (() => { try { applyClaudeModel('{oops', 'sonnet'); return 'no' } catch { return 'threw' } })(), 'threw')
+check('模型 id 合法字符', [normalizeModelId('deepseek-v4-pro'), normalizeModelId('gpt-5-codex'), normalizeModelId('a/b:c')], ['deepseek-v4-pro', 'gpt-5-codex', 'a/b:c'])
+check('模型 id 拒绝空格/引号/空串', [normalizeModelId('a b'), normalizeModelId('a"b'), normalizeModelId('  ')], [null, null, null])
+check('外部 harness 只承认两种平台', HARNESS_APPS.map(app => app.id), ['codex', 'claude-code'])
+
+// 用临时 CODEX_HOME 验证快照读取（不碰真实的 ~/.codex）
+const fakeCodexHome = mkdtempSync(join(tmpdir(), 'lead-panel-codex-'))
+writeFileSync(join(fakeCodexHome, 'config.toml'), codexToml, 'utf8')
+writeFileSync(join(fakeCodexHome, 'catalog.json'), JSON.stringify({
+  models: [
+    { slug: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash' },
+    { slug: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro' },
+  ],
+}), 'utf8')
+const previousCodexHome = process.env.CODEX_HOME
+process.env.CODEX_HOME = fakeCodexHome
+const codexApp = harnessAppInfo(HARNESS_APPS[0])
+check('快照读到 Codex 当前模型', codexApp.model, 'deepseek-v4-flash')
+check('快照读到 Codex 模型目录', codexApp.models.map(model => model.name), ['DeepSeek V4 Flash', 'DeepSeek V4 Pro'])
+check('快照带上配置文件路径', codexApp.configPath, join(fakeCodexHome, 'config.toml'))
+check('快照标记配置存在', codexApp.configExists, true)
+checkTrue('快照带「改完下一条生效」说明', String(codexApp.note).includes('下一条'))
+if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+else process.env.CODEX_HOME = previousCodexHome
+
+// ── 10) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
 const clientSource = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 let registration = null
 const fakeWindow = { __ModuleLoader__: { load: (entry) => { registration = entry } } }
@@ -217,6 +267,14 @@ checkTrue('工人来源选择器', clientSource.includes('lp-harness') && client
 checkTrue('派活时把来源发给 Host', clientSource.includes('harness: selectedHarness'))
 checkTrue('外部工人带「外部」标记', clientSource.includes('externalTag') && clientSource.includes('lp-tag'))
 checkTrue('来源不可用时给提示', clientSource.includes('harnessNoProvider'))
+
+// ── 11) 领导模型 / 打开外部平台 ─────────────────────────────────────────────
+checkTrue('外部 harness 领导有独立的「领导模型」行', clientSource.includes('HarnessAppRow') && clientSource.includes('harnessModel'))
+checkTrue('换模型走 Host 的原生配置接口', clientSource.includes("'/harness-model'"))
+checkTrue('打开平台按钮', clientSource.includes("'/open'") && clientSource.includes("onOpen(app.id, 'app')"))
+checkTrue('打开配置文件按钮', clientSource.includes("onOpen(app.id, 'config')"))
+checkTrue('模型下拉用配置里的模型', clientSource.includes('lp-hmodel') && clientSource.includes('app.models'))
+checkTrue('工人来源也能打开平台', clientSource.includes('workerModel') && clientSource.includes('workerApp'))
 
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)

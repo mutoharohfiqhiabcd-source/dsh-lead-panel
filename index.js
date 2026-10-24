@@ -14,7 +14,9 @@
 //   POST /lead-panel/api/ensure     确保「领导」会话存在（reset=1 则重开）
 //   POST /lead-panel/api/send       { text }            给领导发一条消息
 //   POST /lead-panel/api/dispatch   { text }            让它总结+派活
-//   POST /lead-panel/api/model      { provider, model } 切换领导的模型
+//   POST /lead-panel/api/model      { provider, model } 切换领导的模型（DSH 领导）
+//   POST /lead-panel/api/harness-model { platform, model } 换外部 harness 领导的原生模型
+//   POST /lead-panel/api/open       { platform, what }   打开对应平台 / 它的配置文件
 //   POST /lead-panel/api/cancel                        打断领导当前回合
 //
 // 只用 ctx 上的服务（sessionController / agents / sessions / llm /
@@ -22,9 +24,10 @@
 // ============================================================================
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 export const name = 'dsh-lead-panel'
 /** 没有必需服务：缺哪个就降级哪个，headless profile 下也不会报错。 */
@@ -424,6 +427,287 @@ async function runHarnessLeaderTurn(ctx, options, leader, userText, dispatch) {
   }
 }
 
+// ── 外部 harness 的原生配置：换模型 / 打开平台（0.9.0）──────────────────────────
+//
+// 外部 harness 当「领导」时，模型的真正来源是它自己的配置文件，不是 DSH 的模型列表：
+//   · Codex       → $CODEX_HOME/config.toml（默认 ~/.codex/config.toml）里的 `model`
+//   · Claude Code → ~/.claude/settings.json 里的 `model`（没有 = 用它自己的默认）
+// 所以面板只做三件事：把当前模型读出来、改这一个字段（写前留 .bak）、
+// 新开一个终端跑它的 CLI 或者用记事本打开它的配置。其它配置一概不碰。
+
+const HARNESS_APPS = [
+  {
+    id: 'codex',
+    label: 'Codex',
+    kind: 'toml',
+    configPath: () => join(codexHome(), 'config.toml'),
+    fallbackModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    note: '改的是 Codex 自己的 config.toml，下一条领导回复就生效',
+  },
+  {
+    id: 'claude-code',
+    label: 'Claude Code',
+    kind: 'json',
+    configPath: () => join(homedir(), '.claude', 'settings.json'),
+    fallbackModels: ['sonnet', 'opus', 'haiku'],
+    note: '改的是 Claude Code 自己的 settings.json（model 字段），下一条领导回复就生效；留空 = 用它自己的默认',
+  },
+]
+
+/** Codex 的配置目录（尊重 CODEX_HOME）。 */
+function codexHome() {
+  const env = typeof process.env.CODEX_HOME === 'string' ? process.env.CODEX_HOME.trim() : ''
+  return env || join(homedir(), '.codex')
+}
+
+function readTextFile(path) {
+  try { return readFileSync(path, 'utf8') } catch { return null }
+}
+
+/** 模型 id 的合法字符集：够覆盖 deepseek-v4-pro / gpt-5-codex / claude-sonnet-4-5 这些。 */
+function normalizeModelId(value) {
+  if (typeof value !== 'string') return null
+  const model = value.trim()
+  if (!model || model.length > 120) return null
+  return /^[A-Za-z0-9][A-Za-z0-9._:\/-]*$/u.test(model) ? model : null
+}
+
+/** 从 Codex config.toml 文本里读 model / model_provider / base_url（纯函数）。 */
+function parseCodexConfig(raw) {
+  if (typeof raw !== 'string') return { model: null, provider: null, baseUrl: null, catalogPath: null }
+  const readKey = key => {
+    const match = raw.match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*"([^"]*)"`, 'mu'))
+    return match ? match[1] : null
+  }
+  const provider = readKey('model_provider')
+  // 只按「段头 + 键=值字符串」逐行扫，避免用跨行正则去猜段的边界。
+  const sections = {}
+  let current = null
+  for (const line of raw.split(/\r?\n/u)) {
+    const header = line.match(/^\[([^\]]+)\][ \t]*$/u)
+    if (header) {
+      current = header[1].trim()
+      if (!sections[current]) sections[current] = {}
+      continue
+    }
+    if (current === null) continue
+    const pair = line.match(/^[ \t]*([A-Za-z0-9_.-]+)[ \t]*=[ \t]*"([^"]*)"/u)
+    if (pair) sections[current][pair[1]] = pair[2]
+  }
+  const baseUrl = provider ? (sections[`model_providers.${provider}`]?.base_url ?? null) : null
+  return { model: readKey('model'), provider, baseUrl, catalogPath: readKey('model_catalog_json') }
+}
+
+/** 把 model 写进 Codex config.toml 文本（纯函数）：有 `model =` 就替换，没有就插在 model_provider 后面。 */
+function applyCodexModel(raw, model) {
+  const text = typeof raw === 'string' ? raw : ''
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  const lines = text.split(/\r?\n/u)
+  const modelIndex = lines.findIndex(line => /^[ \t]*model[ \t]*=[ \t]*"[^"]*"[ \t]*$/u.test(line))
+  if (modelIndex >= 0) {
+    lines[modelIndex] = `model = "${model}"`
+  } else {
+    const providerIndex = lines.findIndex(line => /^[ \t]*model_provider[ \t]*=[ \t]*"[^"]*"[ \t]*$/u.test(line))
+    lines.splice(providerIndex >= 0 ? providerIndex + 1 : 0, 0, `model = "${model}"`)
+  }
+  return lines.join(eol)
+}
+
+/** 把 model 写进 Claude Code settings.json 文本（纯函数）；空字符串 = 删掉该字段用它自己的默认。 */
+function applyClaudeModel(raw, model) {
+  const parsed = JSON.parse(raw)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('settings.json 顶层不是对象')
+  if (typeof model === 'string' && model) parsed.model = model
+  else delete parsed.model
+  return `${JSON.stringify(parsed, null, 2)}\n`
+}
+
+const catalogCache = { path: null, mtimeMs: 0, models: [] }
+
+/** Codex 的模型目录（config.toml 里 model_catalog_json 指向的文件）：给「换模型」当快捷选项。 */
+function codexCatalogModels() {
+  const home = codexHome()
+  const config = parseCodexConfig(readTextFile(join(home, 'config.toml')) ?? '')
+  if (!config.catalogPath) return []
+  const file = isAbsolute(config.catalogPath) ? config.catalogPath : join(home, config.catalogPath)
+  try {
+    const stat = statSync(file)
+    if (catalogCache.path === file && catalogCache.mtimeMs === stat.mtimeMs) return catalogCache.models
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    const list = Array.isArray(parsed?.models) ? parsed.models : []
+    const models = list
+      .map(item => ({
+        id: typeof item?.slug === 'string' ? item.slug : (typeof item?.id === 'string' ? item.id : ''),
+        name: typeof item?.display_name === 'string' && item.display_name
+          ? item.display_name
+          : String(item?.slug ?? item?.id ?? ''),
+      }))
+      .filter(item => item.id)
+    catalogCache.path = file
+    catalogCache.mtimeMs = stat.mtimeMs
+    catalogCache.models = models
+    return models
+  } catch {
+    return []
+  }
+}
+
+/** 在 PATH / 已知安装目录里找一个可执行文件（只判断存在，不执行）。 */
+function findExecutable(names, extra = []) {
+  const found = []
+  for (const candidate of extra) if (candidate && existsSync(candidate)) found.push(candidate)
+  for (const dir of String(process.env.PATH ?? '').split(';')) {
+    if (!dir) continue
+    for (const name of names) {
+      const candidate = join(dir, name)
+      if (existsSync(candidate)) { found.push(candidate); break }
+    }
+  }
+  return found[0] ?? null
+}
+
+/** Codex 的 CLI：优先桌面版自带的 codex.exe，其次 PATH 里的。 */
+function findCodexBin() {
+  const extra = []
+  try {
+    const base = join(process.env.LOCALAPPDATA ?? '', 'OpenAI', 'Codex', 'bin')
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const candidate = join(base, entry.name, 'codex.exe')
+      if (existsSync(candidate)) extra.push(candidate)
+    }
+  } catch { /* 没装桌面版 */ }
+  return findExecutable(['codex.exe', 'codex.cmd', 'codex.bat', 'codex'], extra)
+}
+
+/** Claude Code 的 CLI：npm 全局装的 claude.cmd 或 PATH 里的。 */
+function findClaudeBin() {
+  const appData = process.env.APPDATA ?? ''
+  return findExecutable(['claude.cmd', 'claude.exe', 'claude'], [
+    appData ? join(appData, 'npm', 'claude.cmd') : '',
+  ])
+}
+
+function hostOf(url) {
+  try { return new URL(url).host } catch { return url }
+}
+
+/** 一个外部 harness 的「当前模型 + 配置位置 + 可执行文件」快照。 */
+function harnessAppInfo(app) {
+  const configPath = app.configPath()
+  const raw = readTextFile(configPath)
+  const info = {
+    id: app.id,
+    label: app.label,
+    kind: app.kind,
+    configPath,
+    configExists: raw !== null,
+    note: app.note,
+    model: null,
+    provider: null,
+    providerLabel: null,
+    baseUrl: null,
+    models: [],
+  }
+  if (app.kind === 'toml') {
+    const config = parseCodexConfig(raw ?? '')
+    info.model = config.model
+    info.provider = config.provider
+    info.baseUrl = config.baseUrl
+    info.providerLabel = config.provider
+      ? (config.baseUrl ? `${config.provider} · ${hostOf(config.baseUrl)}` : config.provider)
+      : null
+    info.models = [...codexCatalogModels()]
+  } else {
+    try {
+      const parsed = raw === null ? {} : JSON.parse(raw)
+      info.model = typeof parsed?.model === 'string' ? parsed.model : null
+    } catch {
+      info.configError = 'settings.json 不是合法 JSON，改模型前先修好它'
+    }
+  }
+  for (const model of app.fallbackModels ?? []) {
+    if (!info.models.some(item => item.id === model)) info.models.push({ id: model, name: model })
+  }
+  if (info.model && !info.models.some(item => item.id === info.model)) {
+    info.models.unshift({ id: info.model, name: info.model })
+  }
+  const bin = app.id === 'codex' ? findCodexBin() : app.id === 'claude-code' ? findClaudeBin() : null
+  info.bin = bin
+  info.canOpen = Boolean(bin)
+  return info
+}
+
+/** 可编辑模型的外部 harness 快照；提供方没注册就不出现。 */
+function harnessAppsOf(providerNames) {
+  const out = {}
+  for (const app of HARNESS_APPS) {
+    if (!providerNames.has(app.id)) continue
+    try {
+      out[app.id] = harnessAppInfo(app)
+    } catch (error) {
+      out[app.id] = { id: app.id, label: app.label, error: describeError(error), canOpen: false, models: [] }
+    }
+  }
+  return out
+}
+
+/** 写外部 harness 的原生模型字段（先备份原文件，只改这一个字段）。 */
+function writeHarnessModel(platform, model) {
+  const app = HARNESS_APPS.find(item => item.id === platform)
+  if (!app) throw new Error(`未知平台：${platform}`)
+  const wanted = typeof model === 'string' ? model.trim() : ''
+  const allowEmpty = app.kind === 'json'
+  const id = normalizeModelId(wanted)
+  if (!id && !(allowEmpty && wanted === '')) {
+    throw new Error('模型 id 不合法：只允许字母、数字和 . _ : / -')
+  }
+  const configPath = app.configPath()
+  const raw = readTextFile(configPath)
+  if (raw === null) throw new Error(`找不到 ${app.label} 的配置文件：${configPath}（先手动启动一次 ${app.label}）`)
+  const next = app.kind === 'toml' ? applyCodexModel(raw, id) : applyClaudeModel(raw, id ?? '')
+  if (next !== raw) {
+    try { writeFileSync(`${configPath}.lead-panel.bak`, raw, 'utf8') } catch { /* 备份失败也照写，别把人卡住 */ }
+    writeFileSync(configPath, next, 'utf8')
+  }
+  return {
+    platform: app.id,
+    model: id,
+    changed: next !== raw,
+    configPath,
+    info: harnessAppInfo(app),
+  }
+}
+
+/** 打开外部 harness：新终端跑它的 CLI，或用记事本打开它的配置文件。 */
+function planOpen(platform, what) {
+  const app = HARNESS_APPS.find(item => item.id === platform)
+  if (!app) throw new Error(`未知平台：${platform}`)
+  const info = harnessAppInfo(app)
+  if (what === 'config') {
+    if (!info.configExists) throw new Error(`配置文件还不存在：${info.configPath}（先手动启动一次 ${app.label}）`)
+    return { kind: 'config', program: 'notepad.exe', args: [info.configPath], target: info.configPath, label: `${app.label} 配置` }
+  }
+  if (!info.bin) {
+    throw new Error(`没找到 ${app.label} 的可执行文件：先在终端里手动运行一次 ${app.id === 'codex' ? 'codex' : 'claude'}`)
+  }
+  return { kind: 'app', program: info.bin, args: [], target: info.bin, label: app.label }
+}
+
+/** 新开一个窗口跑外部 harness（Windows 用 start，其它系统只给提示）。 */
+function launchDetached(plan) {
+  if (process.platform !== 'win32') {
+    throw new Error('一键打开目前只支持 Windows；请手动在终端里启动它')
+  }
+  const child = spawn('cmd.exe', ['/c', 'start', '', plan.program, ...plan.args], {
+    cwd: homedir(),
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+  })
+  child.on('error', () => { /* 新窗口起不来不影响面板 */ })
+  child.unref()
+}
 
 /**
  * 默认价目表：元 / 百万 token。
@@ -1005,6 +1289,8 @@ async function collectState(ctx, options) {
   const providerNames = new Set((() => {
     try { return s.subagents?.list?.() ?? [] } catch { return [] }
   })())
+  /** 外部 harness 的原生配置快照（当前模型 / 配置文件 / 可执行文件）。 */
+  const harnessApps = harnessAppsOf(providerNames)
   const savedHarness = typeof state.harness === 'string' && HARNESS_MODES.some(item => item.id === state.harness)
     ? state.harness
     : 'team'
@@ -1027,6 +1313,7 @@ async function collectState(ctx, options) {
       running,
       model: null,
       harnesses: harnessModeList(s, providerNames),
+      harnessApps,
       dispatchHarness: savedHarness,
       models: { groups: [], failures: [] },
       messages,
@@ -1089,6 +1376,7 @@ async function collectState(ctx, options) {
     running,
     model: modelSelectionOf(s.projections, session),
     harnesses: harnessModeList(s, providerNames),
+    harnessApps,
     dispatchHarness: savedHarness,
     models,
     messages,
@@ -1119,7 +1407,7 @@ function createApiHandler(ctx, options) {
     try { url = new URL(String(req.url), 'http://localhost') } catch { sendJson(res, 400, { ok: false, error: '非法 URL' }); return }
     const action = url.pathname.slice(options.route.length).replace(/^\//, '')
     const method = String(req.method ?? 'GET').toUpperCase()
-    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'cancel', 'leader', 'mode', 'picks', 'run'])
+    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'harness-model', 'open', 'cancel', 'leader', 'mode', 'picks', 'run'])
     if (postOnly.has(action) ? method !== 'POST' : method !== 'GET') {
       sendJson(res, 405, { ok: false, error: `不支持的方法 ${method}` })
       return
@@ -1137,7 +1425,7 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-10-24T18:40',
+              build: '2026-10-24T16:25',
               route: options.route,
               statePath: statePath(),
               state: readState(),
@@ -1145,6 +1433,20 @@ function createApiHandler(ctx, options) {
               leaders: leaderOptions(s, options).map(item => item.id),
               modes: COLLAB_MODES.map(mode => mode.id),
               platforms: COLLAB_PLATFORMS.map(platform => platform.id),
+              harnessApps: (() => {
+                const names = new Set((() => {
+                  try { return s.subagents?.list?.() ?? [] } catch { return [] }
+                })())
+                const apps = harnessAppsOf(names)
+                return Object.fromEntries(Object.entries(apps).map(([id, info]) => [id, {
+                  label: info.label,
+                  model: info.model,
+                  provider: info.provider,
+                  bin: info.bin,
+                  configPath: info.configPath,
+                  configExists: info.configExists,
+                }]))
+              })(),
               services: {
                 sessionController: Boolean(s.controller),
                 llm: Boolean(s.llm),
@@ -1300,7 +1602,7 @@ function createApiHandler(ctx, options) {
           const s = services(ctx)
           if (!s.controller) throw new Error('sessionController 服务不可用')
           if (resolveLeader(s, options).kind === 'harness') {
-            throw new Error('当前领导是外部 harness，模型由它自己的配置决定；要换领导请用「领导平台」')
+            throw new Error('当前领导是外部 harness：请在「领导模型」里换（写它自己的配置），或换「领导平台」')
           }
           const body = await readJsonBody(req)
           const provider = String(body.provider ?? '').trim()
@@ -1310,6 +1612,27 @@ function createApiHandler(ctx, options) {
           const selected = await s.controller.selectModel({ sessionId, provider, model })
           writeState({ model: { provider, model } })
           sendJson(res, 200, { ok: true, data: { sessionId, selected: selected?.selected ?? { provider, model } } })
+          return
+        }
+        case 'harness-model': {
+          const body = await readJsonBody(req)
+          const platform = String(body.platform ?? '').trim()
+          const model = typeof body.model === 'string' ? body.model : ''
+          const result = writeHarnessModel(platform, model)
+          sendJson(res, 200, { ok: true, data: result })
+          return
+        }
+        case 'open': {
+          // 只认白名单里的平台与动作，不接受任意命令。
+          const body = await readJsonBody(req)
+          const platform = String(body.platform ?? '').trim()
+          const what = body.what === 'config' ? 'config' : 'app'
+          const plan = planOpen(platform, what)
+          launchDetached(plan)
+          sendJson(res, 200, {
+            ok: true,
+            data: { platform, what, target: plan.target, label: plan.label },
+          })
           return
         }
         case 'cancel': {
@@ -1379,6 +1702,15 @@ export const internals = {
   dispatchInstructionFor,
   buildConsultPrompt,
   buildPipelinePrompt,
+  parseCodexConfig,
+  applyCodexModel,
+  applyClaudeModel,
+  normalizeModelId,
+  harnessAppInfo,
+  harnessAppsOf,
+  writeHarnessModel,
+  planOpen,
+  HARNESS_APPS,
 }
 
 export function apply(ctx, config) {

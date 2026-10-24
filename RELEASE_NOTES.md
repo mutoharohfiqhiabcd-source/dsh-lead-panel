@@ -1,5 +1,41 @@
 # 更新说明
 
+## v0.9.0 — 换外部领导的模型 + 一键打开对应平台
+
+> 一句话：切到 Codex / Claude Code 当领导时，模型不再只是「由它自己定」——
+> 面板读出它真正的模型、给你换，旁边还有「打开 Codex」「配置」两个按钮。
+
+### 新增
+
+- **「领导模型」一行**（外部 harness 当领导时出现）：
+  - 模型胶囊显示**它现在真正在用的模型**，读自它自己的配置文件；
+  - 点胶囊是快捷下拉（Codex 的选项来自 `model_catalog_json` 指向的模型目录）；
+  - `换模型` 也可以手动输入 id，保存后**下一条领导回复就生效**，DSH 不用重启。
+- **`打开 Codex` / `打开 Claude Code`**：新开一个终端窗口跑它的 CLI，
+  在里面还能用 `/model` 等原生命令；**`配置`** 用记事本打开它的配置文件。
+- **工人来源也沾光**：工人来源选到外部 harness 时，多一行「工人模型」，同样可换、可打开。
+- **新接口**：`POST /lead-panel/api/harness-model {platform, model}`、`POST /lead-panel/api/open
+  {platform, what}`；`/state` 新增 `harnessApps`（当前模型 / 模型选项 / 配置路径 / 可执行文件）。
+- 写入很保守：只改 `model` 一个字段，写前备份成 `*.lead-panel.bak`；模型 id 校验字符集；
+  `open` 只认白名单平台与动作，且仅允许本机访问。
+
+### 模型来自哪
+
+| 平台 | 配置文件 | 字段 |
+|---|---|---|
+| Codex | `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`） | `model` |
+| Claude Code | `~/.claude/settings.json` | `model`（留空 = 默认） |
+
+> 如果 profile 里的官方 `subagent-codex` / `subagent-claude-code` 行写死了 `model`，
+> 那个优先于原生配置；本机 profile 没写，所以面板改完立即生效。
+
+### 实测
+
+- 沙盒实例：领导切到 Codex 后，面板读到 `deepseek-v4-flash`（`custom · api.deepseek.com`），
+  下拉里能选 `deepseek-v4-pro`；改完 `config.toml` 的 `model` 变成新值、`model_provider` 与
+  `base_url` 原样保留、`.bak` 落在旁边；`cmd /c start` 起 Codex 的窗口确认能拉起进程。
+- `self-check` 96 项、`host-smoke` 92 项全绿。
+
 ## v0.8.0 — 跨平台协作：分工 / 会诊 / 流水线
 
 > 一句话：同一个任务，可以交给多个平台一起处理，方式随你挑 —— 面板顶部多了「协作模式」。

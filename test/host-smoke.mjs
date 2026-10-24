@@ -13,7 +13,7 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 // 别把测试会话写进真实的 ~/.dsh/lead-panel/state.json（否则会把正在用的面板切走）；
@@ -21,6 +21,25 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const smokeHome = join(tmpdir(), 'dsh-lead-panel-smoke-home')
 rmSync(smokeHome, { recursive: true, force: true })
 process.env.DSH_HOME = smokeHome
+// Codex 的原生配置也放进临时目录：这样测试里真的改 model 也不会动到用户的 ~/.codex。
+const smokeCodexHome = join(smokeHome, 'codex')
+mkdirSync(smokeCodexHome, { recursive: true })
+writeFileSync(join(smokeCodexHome, 'config.toml'), `model_provider = "custom"
+model = "deepseek-v4-flash"
+model_reasoning_effort = "high"
+model_catalog_json = "catalog.json"
+
+[model_providers.custom]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+`, 'utf8')
+writeFileSync(join(smokeCodexHome, 'catalog.json'), JSON.stringify({
+  models: [
+    { slug: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash' },
+    { slug: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro' },
+  ],
+}), 'utf8')
+process.env.CODEX_HOME = smokeCodexHome
 
 let failures = 0
 function check(name, actual, expected) {
@@ -173,11 +192,14 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-10-24T18:40')
+check('health 带 build 标记', health.body.data.build, '2026-10-24T16:25')
 check('health 报出协作模式', health.body.data.modes, ['single', 'split', 'consult', 'pipeline'])
+checkTrue('health 带外部 harness 配置快照', Boolean(health.body.data.harnessApps.codex))
 checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
 checkTrue('health 报出 subagents 提供方', health.body.data.services.subagentsProviders.includes('codex'))
 checkTrue('health 报出持久化服务可用', health.body.data.services.sessionPersistence)
+// 外部 harness 的原生配置：直接读它自己的 config.toml
+check('health 读到 Codex 当前模型', health.body.data.harnessApps.codex.model, 'deepseek-v4-flash')
 
 // /send 必须把 signal 传给 prompt（旧代码就是漏了这个才报 throwIfAborted）
 const sent = await request('POST', 'send', { text: '你好' })
@@ -237,6 +259,11 @@ const expectedCost = (3700 * 2 + 9100 * 0.2 + 1000 * 3) / 1_000_000
 check('state 金额估算', Math.abs(data.usage.cost - expectedCost) < 1e-9, true)
 check('state 速度（tok/s）', Math.round(data.usage.tokensPerSecond), 200)
 check('state 进度', data.progress, { done: 2, total: 3 })
+// 外部 harness 的原生配置（面板「领导模型」/「打开平台」用）
+check('state 带 Codex 配置快照', [data.harnessApps.codex.model, data.harnessApps.codex.configExists], ['deepseek-v4-flash', true])
+check('state 给出 Codex 模型快捷选项', data.harnessApps.codex.models.map(model => model.id), ['deepseek-v4-flash', 'deepseek-v4-pro'])
+check('state 显示 Codex 供应商', data.harnessApps.codex.providerLabel, 'custom · api.deepseek.com')
+checkTrue('state 带 Claude Code 配置快照', String(data.harnessApps['claude-code'].configPath).endsWith('settings.json'))
 
 const debug = await request('GET', 'debug-session', undefined, `?id=${WORKER_COLD}`)
 check('debug-session 读到冷会话事件数', debug.body.data.assistantMessages, 1)
@@ -271,6 +298,25 @@ check('Codex 领导派活出了计划卡', [harnessAfterDispatch.plan.need, harn
 checkTrue('派活 prompt 带四段格式要求', subagentRuns.at(-1).prompt[0].text.includes('【预计时间】'))
 const modelBlocked = await request('POST', 'model', { provider: 'deepseek-official', model: 'deepseek-flash' })
 check('Codex 领导不能切模型', modelBlocked.status, 500)
+
+// 外部 harness 的「换模型」：真的改它自己的 config.toml（写前备份）
+const appModel = await request('POST', 'harness-model', { platform: 'codex', model: 'deepseek-v4-pro' })
+check('harness-model 200', appModel.status, 200)
+check('harness-model 回显新模型', appModel.body.data.model, 'deepseek-v4-pro')
+const patchedToml = readFileSync(join(smokeCodexHome, 'config.toml'), 'utf8')
+checkTrue('config.toml 真的换了 model', patchedToml.includes('model = "deepseek-v4-pro"'))
+checkTrue('config.toml 没动 provider 段', patchedToml.includes('model_provider = "custom"') && patchedToml.includes('https://api.deepseek.com'))
+checkTrue('改前留了 .bak 备份', existsSync(join(smokeCodexHome, 'config.toml.lead-panel.bak')))
+const afterAppModel = (await request('GET', 'state')).body.data
+check('state 立刻反映新模型', afterAppModel.harnessApps.codex.model, 'deepseek-v4-pro')
+const badAppModel = await request('POST', 'harness-model', { platform: 'codex', model: 'bad model' })
+check('非法模型 id 500', badAppModel.status, 500)
+checkTrue('非法模型 id 有提示', String(badAppModel.body.error).includes('模型 id 不合法'))
+const badPlatformModel = await request('POST', 'harness-model', { platform: 'nope', model: 'x' })
+check('未知平台换模型 500', badPlatformModel.status, 500)
+const badOpen = await request('POST', 'open', { platform: 'nope', what: 'app' })
+check('未知平台打开 500', badOpen.status, 500)
+checkTrue('打开接口只认白名单', String(badOpen.body.error).includes('未知平台'))
 
 // ── 跨平台：分工 / 会诊 / 流水线 ────────────────────────────────────────────
 await request('POST', 'mode', { mode: 'consult' })
