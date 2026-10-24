@@ -13,10 +13,14 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { rmSync } from 'node:fs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-// 别把测试会话写进真实的 ~/.dsh/lead-panel/state.json（否则会把正在用的面板切走）
-process.env.DSH_HOME = join(tmpdir(), 'dsh-lead-panel-smoke-home')
+// 别把测试会话写进真实的 ~/.dsh/lead-panel/state.json（否则会把正在用的面板切走）；
+// 每次重跑前清空临时 home，避免上一次的「领导平台」选择污染下一次。
+const smokeHome = join(tmpdir(), 'dsh-lead-panel-smoke-home')
+rmSync(smokeHome, { recursive: true, force: true })
+process.env.DSH_HOME = smokeHome
 
 let failures = 0
 function check(name, actual, expected) {
@@ -81,6 +85,8 @@ const sessions = new Map([
 
 const prompts = []
 const selected = []
+const subagentRuns = []
+let subagentReply = '（默认外部 harness 回复）'
 const persisted = {
   [WORKER_COLD]: [
     { type: 'assistant/message', time: 1, data: { message: { content: [{ type: 'text', text: '链接检查完成，0 个坏链' }] }, usage: { inputTokens: '400', cacheReadTokens: '100', outputTokens: '80' } } },
@@ -127,8 +133,18 @@ const ctx = {
         close: async () => {},
       }),
     },
-    // 官方 Codex / Claude Code 提供方已注册（面板据此点亮「工人来源」）
-    subagents: { list: () => ['spawn', 'fork', 'codex', 'claude-code'] },
+    // 官方 Codex / Claude Code 提供方已注册（面板据此点亮「工人来源」/「领导平台」）
+    subagents: {
+      list: () => ['spawn', 'fork', 'codex', 'claude-code'],
+      start: async (provider, request) => {
+        subagentRuns.push({ provider, ...request })
+        return {
+          id: 'run-1',
+          result: Promise.resolve({ output: [{ type: 'text', text: subagentReply }], stopReason: 'completed' }),
+          dispose: async () => {},
+        }
+      },
+    },
   })[name] ?? null,
 }
 
@@ -157,7 +173,8 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-10-22T14:10')
+check('health 带 build 标记', health.body.data.build, '2026-10-24T16:10')
+checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
 checkTrue('health 报出 subagents 提供方', health.body.data.services.subagentsProviders.includes('codex'))
 checkTrue('health 报出持久化服务可用', health.body.data.services.sessionPersistence)
 
@@ -222,6 +239,37 @@ check('state 进度', data.progress, { done: 2, total: 3 })
 
 const debug = await request('GET', 'debug-session', undefined, `?id=${WORKER_COLD}`)
 check('debug-session 读到冷会话事件数', debug.body.data.assistantMessages, 1)
+
+// ── 外部 harness 当领导：Codex 直接聊天 / 派活 ──────────────────────────────
+check('state 领导平台列表', data.leaders.map(item => item.id), ['dsh', 'harness:codex', 'harness:claude-code'])
+check('默认领导是 DSH', data.leader, 'dsh')
+const switched = await request('POST', 'leader', { leader: 'harness:codex' })
+check('切换领导平台 200', switched.status, 200)
+check('切换后领导是 Codex', switched.body.data.leader, 'harness:codex')
+const badLeader = await request('POST', 'leader', { leader: 'nope' })
+check('未知领导平台 500', badLeader.status, 500)
+
+subagentReply = '收到，我是 GPT，正在看你的需求。'
+await request('POST', 'send', { text: '你好，你是谁？' })
+await new Promise(resolve => setTimeout(resolve, 30))
+const harnessState = (await request('GET', 'state')).body.data
+check('Codex 领导类型', harnessState.leaderKind, 'harness')
+check('Codex 领导对话记录', harnessState.messages.map(message => message.role), ['user', 'lead'])
+checkTrue('Codex 领导回复进了面板', harnessState.messages[1].text.includes('我是 GPT'))
+check('Codex 领导没有工人列表', harnessState.workers.length, 0)
+check('Codex 领导 token 未知', harnessState.usage.tokens, null)
+check('Codex 领导模型下拉为空', harnessState.models.groups.length, 0)
+checkTrue('外部 run 用的是 codex 提供方', subagentRuns.at(-1).provider === 'codex')
+checkTrue('第二轮 prompt 带上了上一轮对话', subagentRuns.at(-1).prompt[0].text.includes('你好，你是谁'))
+
+subagentReply = '【需求】改 README\n【效果】新人能看懂\n【分工】Codex 直接改\n【预计时间】2 分钟\n已经改好了'
+await request('POST', 'dispatch', { text: '把 README 改好' })
+await new Promise(resolve => setTimeout(resolve, 30))
+const harnessAfterDispatch = (await request('GET', 'state')).body.data
+check('Codex 领导派活出了计划卡', [harnessAfterDispatch.plan.need, harnessAfterDispatch.plan.effect], ['改 README', '新人能看懂'])
+checkTrue('派活 prompt 带四段格式要求', subagentRuns.at(-1).prompt[0].text.includes('【预计时间】'))
+const modelBlocked = await request('POST', 'model', { provider: 'deepseek-official', model: 'deepseek-flash' })
+check('Codex 领导不能切模型', modelBlocked.status, 500)
 
 const missing = await request('GET', 'nope')
 check('未知接口 404', missing.status, 404)

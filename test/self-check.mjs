@@ -34,7 +34,7 @@ const { internals } = await import(`file://${join(root, 'index.js').replace(/\\/
 const {
   foldUsage, usageIsEmpty, extractPlan, costOf, addUsage, readMessagesFromEvents,
   normalizeConfig, priceOf, dispatchInstruction, externalWorkersFromEvents, parseToolArguments,
-  HARNESS_MODES,
+  HARNESS_MODES, leaderOptions, buildLeaderPrompt, LEADER_DSH, DEFAULT_LEADER_LABELS,
 } = internals
 
 // ── 1) 用量折叠：四个桶互不重叠，按事件累加 ─────────────────────────────────
@@ -125,7 +125,31 @@ checkTrue('完成后显示最终答案', externalWorkers[1].lastText.startsWith(
 check('外部 harness 不占 token', externalWorkers.map(item => item.usage), [null, null])
 check('坏 arguments 当空对象', parseToolArguments('{oops'), {})
 
-// ── 7) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
+// ── 7) 领导平台：DSH 官方 或 外部 harness ──────────────────────────────────
+const fakeServices = {
+  controller: {},
+  subagents: { list: () => ['spawn', 'fork', 'acp', 'codex', 'claude-code', 'codex-gpt'] },
+}
+const leaderOpts = normalizeConfig({ leaders: { codex: 'Codex · GPT', 'codex-gpt': 'Codex · GPT-5' } })
+const leaders = leaderOptions(fakeServices, leaderOpts)
+check('领导平台列表', leaders.map(item => item.id), [LEADER_DSH, 'harness:codex', 'harness:claude-code', 'harness:codex-gpt'])
+check('进程内提供方不算领导平台', leaders.some(item => item.id.includes('spawn') || item.id.includes('fork') || item.id.includes('acp')), false)
+check('DSH 是默认领导', leaders[0].kind, 'dsh')
+check('Codex 领导是可用的外部 harness', [leaders[1].kind, leaders[1].provider, leaders[1].available], ['harness', 'codex', true])
+check('领导展示名可配置', leaders[1].label, 'Codex · GPT')
+checkTrue('内置展示名', DEFAULT_LEADER_LABELS.codex.includes('Codex'))
+
+const leaderPrompt = buildLeaderPrompt('Codex · GPT', [
+  { role: 'user', text: '先聊聊需求' },
+  { role: 'lead', text: '好，说说看' },
+], '把 README 改一下', true)
+checkTrue('领导 prompt 带角色说明', leaderPrompt.includes('「领导」'))
+checkTrue('领导 prompt 带对话历史', leaderPrompt.includes('用户：先聊聊需求') && leaderPrompt.includes('领导：好，说说看'))
+checkTrue('派活 prompt 要求四段格式', leaderPrompt.includes('【需求】') && leaderPrompt.includes('【预计时间】'))
+checkTrue('派活 prompt 要求直接动手', leaderPrompt.includes('直接动手'))
+check('闲聊 prompt 不带派活要求', buildLeaderPrompt('Codex', [], '你好', false).includes('【需求】'), false)
+
+// ── 8) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
 const clientSource = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 let registration = null
 const fakeWindow = { __ModuleLoader__: { load: (entry) => { registration = entry } } }
@@ -171,6 +195,11 @@ checkTrue('不再使用原生 select（深色主题下看不清）', !/<select/.
 checkTrue('provider 展示名与模型名分开渲染', clientSource.includes('lp-model-provider') && clientSource.includes('lp-model-value'))
 checkTrue('显示推理强度（reasoningEffort）', clientSource.includes('lp-model-effort') && clientSource.includes('reasoningEffort'))
 
+// ── 10) 领导平台选择器 ─────────────────────────────────────────────────────
+checkTrue('领导平台选择器', clientSource.includes("post('/leader'") && clientSource.includes("'leader'"))
+checkTrue('外部 harness 的派活按钮文案', clientSource.includes('letItWork'))
+checkTrue('外部 harness 领导不显示工人来源', clientSource.includes('!harnessLeader'))
+checkTrue('外部 harness 领导隐藏模型下拉', clientSource.includes('leaderModelNative'))
 // ── 9) 工人来源选择器与外部工人样式 ────────────────────────────────────────
 checkTrue('工人来源选择器', clientSource.includes('lp-harness') && clientSource.includes('lp-seg'))
 checkTrue('派活时把来源发给 Host', clientSource.includes('harness: selectedHarness'))

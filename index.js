@@ -81,6 +81,167 @@ function dispatchInstruction(harness) {
   return `${PLAN_SPEC}${HARNESS_RULES[mode.id]}\n\n用户的原始需求如下：\n`
 }
 
+// ── 领导平台：DSH 官方会话，或外部 harness（Codex / Claude Code）────────────────
+//
+// DSH 的会话只能跑 DSH 自己的 LLM；Codex / Claude Code 是通过官方 subagent
+// 提供方暴露的**一次性运行**。所以「外部 harness 当领导」的实现方式是：
+// 面板保留一段对话记录，每轮把「角色说明 + 历史 + 新消息」拼成一个 prompt 交给
+// 官方 provider 跑一次，把它的最终答复记回对话记录。派活 = 直接让它把活干完
+// （它本来就是完整 agent，有自己的工具）。
+
+const LEADER_DSH = 'dsh'
+/** 内置的提供方展示名（可用 profile 配置 leaders 覆盖）。 */
+const DEFAULT_LEADER_LABELS = { codex: 'Codex（GPT）', 'claude-code': 'Claude Code' }
+/** 不算「领导平台」的进程内提供方。 */
+const INTERNAL_SUBAGENT_PROVIDERS = new Set(['spawn', 'fork', 'acp', 'dsh-sdk'])
+const TRANSCRIPT_LIMIT = 60
+const TRANSCRIPT_ENTRY_LIMIT = 4000
+
+const LEADER_PERSONA = `你是「领导面板」里的「领导」：一个中文软件工程的指挥者，用户是「老板」。
+你运行在外部 harness 里，拥有自己的工具（读写文件、跑命令、搜索等），可以直接把活干完。
+回答要简洁、直接、中文；不要输出内部推理过程，也不要说教。`
+
+const LEADER_DISPATCH_SPEC = `现在用户要你「总结并派活」。请先按下面四段格式简短回答（只写这四段）：
+
+【需求】用户到底要什么（一句话）
+【效果】做完之后用户能看到什么
+【分工】谁去干 + 它负责什么 + 预计耗时
+【预计时间】整件事大概要多久
+
+然后直接动手把这件事做完（该读文件就读、该改代码就改、该跑命令就跑）。
+重要：面板只读取你的**最后一条回复**，所以请把四段和最终结果放进同一条回复里（先四段，再用一两句话写结果）。`
+
+/** 当前正在跑的外部 harness（进程内状态，不落盘）。 */
+let activeLeaderRun = null
+
+/** 可选的领导平台：DSH 官方 + 所有已注册的外部 harness 提供方。 */
+function leaderOptions(s, options) {
+  const labels = options.leaders ?? {}
+  let providers = []
+  try { providers = s.subagents?.list?.() ?? [] } catch { providers = [] }
+  const out = [{
+    id: LEADER_DSH,
+    kind: 'dsh',
+    provider: null,
+    label: labels[LEADER_DSH] || 'DSH 官方',
+    available: Boolean(s.controller),
+  }]
+  for (const provider of providers) {
+    if (INTERNAL_SUBAGENT_PROVIDERS.has(provider)) continue
+    out.push({
+      id: `harness:${provider}`,
+      kind: 'harness',
+      provider,
+      label: labels[provider] || DEFAULT_LEADER_LABELS[provider] || provider,
+      available: true,
+    })
+  }
+  return out
+}
+
+/** 当前领导（默认 DSH 官方）。 */
+function resolveLeader(s, options) {
+  const leaders = leaderOptions(s, options)
+  const saved = readState().leader
+  return leaders.find(item => item.id === saved) ?? leaders[0]
+}
+
+/** 外部 harness 没有会话记忆，每轮都要把对话记录拼进 prompt。 */
+function buildLeaderPrompt(leaderLabel, transcript, userText, dispatch) {
+  const history = (Array.isArray(transcript) ? transcript : [])
+    .filter(message => message && typeof message.text === 'string' && message.text.trim())
+    .slice(-20)
+    .map(message => `${message.role === 'user' ? '用户' : '领导'}：${message.text.slice(0, TRANSCRIPT_ENTRY_LIMIT)}`)
+    .join('\n\n')
+  return [
+    `${LEADER_PERSONA}\n\n你正在「${leaderLabel}」里运行。`,
+    history ? `\n\n===== 之前的对话（从旧到新）=====\n${history}` : '',
+    dispatch
+      ? `\n\n===== 用户这次的要求 =====\n${userText}\n\n${LEADER_DISPATCH_SPEC}`
+      : `\n\n===== 用户的新消息 =====\n${userText}`,
+  ].join('')
+}
+
+/** 读某个领导平台保存的对话记录。 */
+function transcriptOf(leaderId) {
+  const all = readState().transcripts
+  const list = all && Array.isArray(all[leaderId]) ? all[leaderId] : []
+  return list.slice(-TRANSCRIPT_LIMIT)
+}
+
+/** 追加一条对话记录（外部 harness 模式下面板自己维护历史）。 */
+function appendTranscript(leaderId, message) {
+  const state = readState()
+  const all = state.transcripts && typeof state.transcripts === 'object' ? { ...state.transcripts } : {}
+  const list = Array.isArray(all[leaderId]) ? all[leaderId].slice(-(TRANSCRIPT_LIMIT - 1)) : []
+  list.push({
+    role: message.role === 'user' ? 'user' : 'lead',
+    text: String(message.text ?? ''),
+    time: message.time ?? Date.now(),
+    calls: Array.isArray(message.calls) ? message.calls : [],
+    ...(message.failed ? { failed: true } : {}),
+  })
+  all[leaderId] = list
+  writeState({ transcripts: all })
+}
+
+/** 外部 harness 的 parent agent：借领导会话（只提供 cwd / 谱系）。 */
+async function parentAgentForLeader(ctx, options) {
+  const s = services(ctx)
+  const { sessionId } = await ensureLead(ctx, options, false)
+  const live = s.agents?.get?.(sessionId)
+  if (!live) throw new Error('领导会话还没就绪：外部 harness 需要一个 DSH 会话作为 parent（打开面板后再试）')
+  return live
+}
+
+/** 跑一轮外部 harness（聊天或派活），结果写回对话记录。 */
+async function runHarnessLeaderTurn(ctx, options, leader, userText, dispatch) {
+  const s = services(ctx)
+  if (!s.subagents) {
+    appendTranscript(leader.id, { role: 'lead', text: '【外部 harness 不可用】subagents 服务没加载起来', failed: true })
+    return
+  }
+  const controller = new AbortController()
+  activeLeaderRun = {
+    leaderId: leader.id, provider: leader.provider, label: leader.label,
+    startedAt: Date.now(), dispatch, controller,
+  }
+  try {
+    const parent = await parentAgentForLeader(ctx, options)
+    const prompt = buildLeaderPrompt(leader.label, transcriptOf(leader.id), userText, dispatch)
+    const run = await s.subagents.start(leader.provider, {
+      label: dispatch ? '领导：派活' : '领导',
+      prompt: [{ type: 'text', text: prompt }],
+      parent,
+      signal: controller.signal,
+    })
+    let text = ''
+    let failed = false
+    try {
+      const result = await run.result
+      text = textOf(result.output).trim()
+      if (result.stopReason !== 'completed') {
+        failed = true
+        const reason = result.diagnostic ? `${result.stopReason}: ${result.diagnostic}` : String(result.stopReason)
+        text = `${text ? `${text}\n\n` : ''}【运行未正常结束：${reason}】`
+      }
+      if (!text) text = '（没有返回内容）'
+    } finally {
+      try { await run.dispose() } catch { /* 已经结束的 run 再 dispose 是幂等的 */ }
+    }
+    appendTranscript(leader.id, { role: 'lead', text, time: Date.now(), calls: [], failed })
+  } catch (error) {
+    appendTranscript(leader.id, {
+      role: 'lead',
+      text: `【${leader.label} 启动失败】${describeError(error)}`,
+      time: Date.now(), calls: [], failed: true,
+    })
+  } finally {
+    activeLeaderRun = null
+  }
+}
+
+
 /**
  * 默认价目表：元 / 百万 token。
  * DSH 本身没有金额模型（只有 token），所以这里内置 DeepSeek 公开牌价，
@@ -137,6 +298,8 @@ function normalizeConfig(config) {
     leadModel: raw.leadModel && typeof raw.leadModel === 'object' ? raw.leadModel : undefined,
     prices: { ...DEFAULT_PRICES, ...(raw.prices && typeof raw.prices === 'object' ? raw.prices : {}) },
     currency: typeof raw.currency === 'string' && raw.currency.trim() ? raw.currency.trim() : '¥',
+    /** 领导平台展示名覆盖：{ codex: 'Codex · GPT', 'claude-code': 'Claude Code' } */
+    leaders: raw.leaders && typeof raw.leaders === 'object' && !Array.isArray(raw.leaders) ? raw.leaders : {},
   }
 }
 
@@ -589,15 +752,40 @@ async function collectWorkers(ctx, s, leadAgent, options, leadRead) {
   return workers
 }
 
+/** 工人来源列表（可不可用取决于官方提供方是否注册）。 */
+function harnessModeList(s, providerNames) {
+  return HARNESS_MODES.map(mode => {
+    const external = EXTERNAL_HARNESSES.find(item => item.id === mode.id)
+    return {
+      id: mode.id,
+      label: mode.label,
+      tool: external?.tool ?? null,
+      available: mode.id === 'team'
+        ? Boolean(s.teams)
+        : mode.id === 'auto'
+          ? Boolean(s.teams) || EXTERNAL_HARNESSES.some(item => providerNames.has(item.provider))
+          : providerNames.has(external?.provider ?? ''),
+    }
+  })
+}
+
+const PANEL_SERVICES = s => ({
+  controller: Boolean(s.controller),
+  llm: Boolean(s.llm),
+  projections: Boolean(s.projections),
+  sessions: Boolean(s.sessions),
+  agents: Boolean(s.agents),
+  teams: Boolean(s.teams),
+  subagents: Boolean(s.subagents),
+})
+
 /** 面板要的全部状态。 */
 async function collectState(ctx, options) {
   const s = services(ctx)
   const state = readState()
-  const sessionId = state.leadSessionId ?? null
-  const session = sessionId ? (s.sessions?.get?.(sessionId) ?? null) : null
-  const leadAgent = sessionId ? (s.agents?.get?.(sessionId) ?? null) : null
-  const running = leadAgent?.status === 'running' || Boolean(session?.status === 'running')
-
+  const leaders = leaderOptions(s, options)
+  const leader = leaders.find(item => item.id === state.leader) ?? leaders[0]
+  const harnessLeader = leader.kind === 'harness'
   /** 已注册的外部 harness 提供方（Codex / Claude Code 由官方包注册到 ctx.subagents）。 */
   const providerNames = new Set((() => {
     try { return s.subagents?.list?.() ?? [] } catch { return [] }
@@ -605,6 +793,43 @@ async function collectState(ctx, options) {
   const savedHarness = typeof state.harness === 'string' && HARNESS_MODES.some(item => item.id === state.harness)
     ? state.harness
     : 'team'
+  const sessionId = state.leadSessionId ?? null
+
+  // 外部 harness 当领导：对话记录由插件自己维护，用量拿不到。
+  if (harnessLeader) {
+    const messages = transcriptOf(leader.id)
+    const running = Boolean(activeLeaderRun && activeLeaderRun.leaderId === leader.id)
+    return {
+      sessionId,
+      sessionTitle: state.title ?? options.title,
+      leader: leader.id,
+      leaderKind: 'harness',
+      leaders: leaders.map(({ id, kind, provider, label, available }) => ({ id, kind, provider, label, available })),
+      leaderRun: running && activeLeaderRun
+        ? { label: activeLeaderRun.label, dispatch: activeLeaderRun.dispatch, elapsedMs: Date.now() - activeLeaderRun.startedAt }
+        : null,
+      running,
+      model: null,
+      harnesses: harnessModeList(s, providerNames),
+      dispatchHarness: savedHarness,
+      models: { groups: [], failures: [] },
+      messages,
+      plan: extractPlan(messages),
+      workers: [],
+      progress: { done: 0, total: 0 },
+      usage: {
+        tokens: null, cost: null, currency: options.currency,
+        elapsedMs: running && activeLeaderRun ? Date.now() - activeLeaderRun.startedAt : null,
+        tokensPerSecond: null, etaMs: null, priced: false,
+      },
+      priceNote: '外部 harness 不回传 token，金额 / 速度只对 DSH 领导有效',
+      services: PANEL_SERVICES(s),
+    }
+  }
+
+  const session = sessionId ? (s.sessions?.get?.(sessionId) ?? null) : null
+  const leadAgent = sessionId ? (s.agents?.get?.(sessionId) ?? null) : null
+  const running = leadAgent?.status === 'running' || Boolean(session?.status === 'running')
 
   const messages = session ? readMessages(session, MAX_MESSAGES) : []
   const models = await listModels(s)
@@ -640,21 +865,13 @@ async function collectState(ctx, options) {
   return {
     sessionId,
     sessionTitle: state.title ?? options.title,
+    leader: leader.id,
+    leaderKind: 'dsh',
+    leaders: leaders.map(({ id, kind, provider, label, available }) => ({ id, kind, provider, label, available })),
+    leaderRun: null,
     running,
     model: modelSelectionOf(s.projections, session),
-    harnesses: HARNESS_MODES.map(mode => {
-      const external = EXTERNAL_HARNESSES.find(item => item.id === mode.id)
-      return {
-        id: mode.id,
-        label: mode.label,
-        tool: external?.tool ?? null,
-        available: mode.id === 'team'
-          ? Boolean(s.teams)
-          : mode.id === 'auto'
-            ? Boolean(s.teams) || EXTERNAL_HARNESSES.some(item => providerNames.has(item.provider))
-            : providerNames.has(external?.provider ?? ''),
-      }
-    }),
+    harnesses: harnessModeList(s, providerNames),
     dispatchHarness: savedHarness,
     models,
     messages,
@@ -672,14 +889,7 @@ async function collectState(ctx, options) {
       priced: true,
     },
     priceNote: '金额按内置牌价估算（元/百万 token），可在 profile 配置里覆盖',
-    services: {
-      controller: Boolean(s.controller),
-      llm: Boolean(s.llm),
-      projections: Boolean(s.projections),
-      sessions: Boolean(s.sessions),
-      agents: Boolean(s.agents),
-      teams: Boolean(s.teams),
-    },
+    services: PANEL_SERVICES(s),
   }
 }
 
@@ -692,7 +902,7 @@ function createApiHandler(ctx, options) {
     try { url = new URL(String(req.url), 'http://localhost') } catch { sendJson(res, 400, { ok: false, error: '非法 URL' }); return }
     const action = url.pathname.slice(options.route.length).replace(/^\//, '')
     const method = String(req.method ?? 'GET').toUpperCase()
-    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'cancel'])
+    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'cancel', 'leader'])
     if (postOnly.has(action) ? method !== 'POST' : method !== 'GET') {
       sendJson(res, 405, { ok: false, error: `不支持的方法 ${method}` })
       return
@@ -710,11 +920,12 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-10-22T14:10',
+              build: '2026-10-24T16:10',
               route: options.route,
               statePath: statePath(),
               state: readState(),
               harnesses: HARNESS_MODES.map(mode => mode.id),
+              leaders: leaderOptions(s, options).map(item => item.id),
               services: {
                 sessionController: Boolean(s.controller),
                 llm: Boolean(s.llm),
@@ -760,19 +971,48 @@ function createApiHandler(ctx, options) {
         }
         case 'ensure': {
           const body = await readJsonBody(req)
-          const result = await ensureLead(ctx, options, body.reset === true || body.reset === 1)
+          const reset = body.reset === true || body.reset === 1
+          if (reset) {
+            // 外部 harness 当领导时，「重开」= 清空面板里的对话记录
+            const leader = resolveLeader(services(ctx), options)
+            if (leader.kind === 'harness') {
+              const all = { ...(readState().transcripts ?? {}) }
+              delete all[leader.id]
+              writeState({ transcripts: all })
+            }
+          }
+          const result = await ensureLead(ctx, options, reset)
           sendJson(res, 200, { ok: true, data: result })
           return
         }
         case 'send': {
           const body = await readJsonBody(req)
-          const result = await sendToLead(ctx, options, String(body.text ?? ''))
+          const text = String(body.text ?? '').trim()
+          if (!text) throw new Error('消息内容为空')
+          const s = services(ctx)
+          const leader = resolveLeader(s, options)
+          if (leader.kind === 'harness') {
+            appendTranscript(leader.id, { role: 'user', text })
+            void runHarnessLeaderTurn(ctx, options, leader, text, false)
+            sendJson(res, 200, { ok: true, data: { sessionId: readState().leadSessionId ?? null, leader: leader.id, queued: true } })
+            return
+          }
+          const result = await sendToLead(ctx, options, text)
           sendJson(res, 200, { ok: true, data: result })
           return
         }
         case 'dispatch': {
           const body = await readJsonBody(req)
           const need = String(body.text ?? '').trim()
+          const s = services(ctx)
+          const leader = resolveLeader(s, options)
+          if (leader.kind === 'harness') {
+            appendTranscript(leader.id, { role: 'user', text: `【总结并派活】${need || '(见上文)'}` })
+            void runHarnessLeaderTurn(ctx, options, leader, need || '(见上文)', true)
+            writeState({ jobStartedAt: Date.now() })
+            sendJson(res, 200, { ok: true, data: { sessionId: readState().leadSessionId ?? null, leader: leader.id, dispatch: true } })
+            return
+          }
           const requested = String(body.harness ?? '').trim()
           const harness = requested || readState().harness || 'team'
           if (!HARNESS_MODES.some(item => item.id === harness)) throw new Error(`未知的工人来源：${harness}`)
@@ -782,9 +1022,24 @@ function createApiHandler(ctx, options) {
           sendJson(res, 200, { ok: true, data: { ...result, harness } })
           return
         }
+        case 'leader': {
+          const s = services(ctx)
+          const body = await readJsonBody(req)
+          const id = String(body.leader ?? '').trim()
+          const leaders = leaderOptions(s, options)
+          const picked = leaders.find(item => item.id === id)
+          if (!picked) throw new Error(`未知的领导平台：${id}`)
+          if (!picked.available) throw new Error(`领导平台不可用：${picked.label}`)
+          writeState({ leader: picked.id })
+          sendJson(res, 200, { ok: true, data: { leader: picked.id, label: picked.label } })
+          return
+        }
         case 'model': {
           const s = services(ctx)
           if (!s.controller) throw new Error('sessionController 服务不可用')
+          if (resolveLeader(s, options).kind === 'harness') {
+            throw new Error('当前领导是外部 harness，模型由它自己的配置决定；要换领导请用「领导平台」')
+          }
           const body = await readJsonBody(req)
           const provider = String(body.provider ?? '').trim()
           const model = String(body.model ?? '').trim()
@@ -797,6 +1052,16 @@ function createApiHandler(ctx, options) {
         }
         case 'cancel': {
           const s = services(ctx)
+          const leader = resolveLeader(s, options)
+          if (leader.kind === 'harness') {
+            if (activeLeaderRun && activeLeaderRun.leaderId === leader.id) {
+              activeLeaderRun.controller.abort()
+              sendJson(res, 200, { ok: true, data: { cancelled: true, leader: leader.id } })
+              return
+            }
+            sendJson(res, 200, { ok: true, data: { cancelled: false } })
+            return
+          }
           if (!s.controller) throw new Error('sessionController 服务不可用')
           const state = readState()
           if (!state.leadSessionId) { sendJson(res, 200, { ok: true, data: { cancelled: false } }); return }
@@ -834,6 +1099,12 @@ export const internals = {
   parseToolArguments,
   HARNESS_MODES,
   EXTERNAL_HARNESSES,
+  leaderOptions,
+  buildLeaderPrompt,
+  transcriptOf,
+  appendTranscript,
+  LEADER_DSH,
+  DEFAULT_LEADER_LABELS,
 }
 
 export function apply(ctx, config) {

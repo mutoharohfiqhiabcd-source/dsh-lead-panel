@@ -1,5 +1,32 @@
 # 更新说明
 
+## v0.7.0 — 领导也能选平台：DSH 官方 / Codex（GPT）/ Claude Code
+
+> 一句话：不止工人能选，**领导本身也能换人** —— 直接把「领导平台」切到 Codex，
+> 让 Codex 里的 GPT 来当这个领导。
+
+### 新增
+
+- **「领导平台」三选一**（面板顶部）：`DSH 官方` / `Codex（GPT）` / `Claude Code`，选择记在
+  `<DSH_HOME>\lead-panel\state.json`。不是 DSH 官方的平台会以「外部 harness」的方式工作。
+- **外部 harness 当领导**：官方 subagent 提供方是一次性运行，所以面板自己维护这段对话——
+  每轮把「角色说明 + 历史 + 新消息」拼成一条 prompt 交给官方 `ctx.subagents.start()`，
+  把最终答复记回对话记录。派活 = 直接让它把活干完（它自己读写文件、跑命令）。
+- **界面适配**：外部 harness 当领导时，模型下拉变成「模型由它自己定 + 平台名」，
+  工人区隐藏，按钮变成「让它直接干活」，金额 / 速度显示 `—`，并提示「外部 harness 不回传 token」。
+- **`POST /lead-panel/api/leader`** 切换领导平台；`/state` 新增 `leaders` / `leader` /
+  `leaderKind` / `leaderRun`；`/ensure {reset:true}` 在外部 harness 模式下同时清空面板对话记录。
+- **配置 `leaders`**：覆盖领导平台展示名；多挂几个官方 provider 实例（不同 `providerName` +
+  `model`）就会在面板上各占一个「领导平台」格，用 `leaders` 给它们起名字。
+- 领导 prompt 拆成「角色说明」与「派活规格」两段；派活时强制把四段计划与结果放进同一条最终回复
+  （面板只读最后一条回复）。
+
+### 实测
+
+- 沙盒实例里把领导切到 Codex 后：闲聊能回（「我是领导，当前运行在 Codex 中，底层模型是 GPT-5」），
+  派活能直接建文件并回来汇报，四段计划卡正常显示。
+- `self-check` 64 项、`host-smoke` 64 项，全绿。
+
 ## v0.6.0 — 把活派给官方 Codex / Claude Code
 
 > 一句话：面板多了「工人来源」，领导可以直接把活交给真正的 **Codex** 或 **Claude Code**，

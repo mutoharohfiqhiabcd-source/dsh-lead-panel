@@ -40,12 +40,15 @@ token、估算金额、用时和预计剩余时间。
 派活时可以选择**工人来源**：官方 Agent Teams 现场组队，或者直接把活交给官方
 **Codex / Claude Code** 的 subagent 提供方（都是 DSH 官方能力，本插件只负责发指令和显示过程）。
 
-当前版本 **0.6.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 49 项 + Host 冒烟 47 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+**领导本身也能换平台**：顶部的「领导平台」可以在 `DSH 官方`、`Codex（GPT）`、`Claude Code`
+之间切换 —— 选外部 harness 时，它就是领导，每轮带着对话历史跑一次，「派活」= 直接让它把活干完。
+
+当前版本 **0.7.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 64 项 + Host 冒烟 64 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
-> 面板长这样：顶部是状态、**模型选择**（当前模型名 + provider 胶囊 + 推理强度）与
-> **「工人来源」切换**（官方团队 / Codex / Claude Code / 自动选），中间是计划卡片、
+> 面板长这样：顶部是状态、**「领导平台」切换**、**模型选择**（当前模型名 + provider 胶囊 +
+> 推理强度）与 **「工人来源」切换**（官方团队 / Codex / Claude Code / 自动选），中间是计划卡片、
 > 对话与工人区，底部是 token / 估算金额 / 用时 / 预计剩余 / 速度五个指标块，
 > 以及「总结并派活」「发送」两个按钮。
 
@@ -53,7 +56,8 @@ token、估算金额、用时和预计剩余时间。
 
 | 面板区域 | 内容 |
 |---|---|
-| 顶部 | 领导当前状态（运行中 / 空闲）、**模型下拉框**（列出本机所有 provider/模型，按 provider 分组、模型全名、当前项打勾，选一下即切换），并常显当前模型 + provider 胶囊 + 推理强度；另有打断、重开 |
+| 顶部 | 领导当前状态（运行中 / 空闲）、**「领导平台」切换**（DSH 官方 / Codex / Claude Code，见下一节）、**模型下拉框**（列出本机所有 provider/模型，按 provider 分组、模型全名、当前项打勾，选一下即切换），并常显当前模型 + provider 胶囊 + 推理强度；另有打断、重开 |
+| 领导平台 | `DSH 官方` / `Codex（GPT）` / `Claude Code` 三选一。DSH 官方是普通会话（模型可切、能组队派活）；外部 harness 让它自己当领导，每轮带着对话历史跑一次，派活 = 直接动手 |
 | 工人来源 | `官方团队` / `Codex` / `Claude Code` / `自动选` 四选一。没装官方提供方的来源会置灰，鼠标悬停有提示；选择记在 Host 里，下次打开面板还是它 |
 | 计划卡 | 领导总结的四段：`【需求】【效果】【分工】【预计时间】`，自动抽成卡片 |
 | 中部 | 与领导的对话；助手消息下面挂它调用的工具名（`spawn_teammate`、`subagent_codex` 等） |
@@ -217,6 +221,44 @@ DSH 官方本来就带两个 subagent 提供方包：
 | 大段文本重构、审阅、写文档、长上下文分析 | `Claude Code` |
 | 懒得选 | `自动选` |
 
+## 让 Codex / Claude Code 当「领导」（0.7.0 新增）
+
+> 一句话：**领导也可以不是 DSH 会话** —— 直接把面板顶部的「领导平台」切到 Codex / Claude Code，
+> 让它的 GPT / Claude 来当这个领导。
+
+![领导平台切到 Codex（GPT），派活 = 它直接动手](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-leader.png)
+
+| 领导平台 | 领导是谁 | 能干的事 |
+|---|---|---|
+| `DSH 官方` | 一个普通 DSH 会话（模型可切） | 聊天、出计划、用 Agent Teams 派活给工人；也是 Codex / Claude Code「工人模式」的前提 |
+| `Codex（GPT）` | 官方 Codex harness | 每轮带着对话历史跑一次；派活 = 它直接动手做（自己读写文件、跑命令） |
+| `Claude Code` | 官方 Claude Code harness | 同上，需要本机先登录 Claude Code |
+
+选外部 harness 当领导时：
+
+- 面板自己保存对话记录，每轮把「角色说明 + 历史 + 新消息」拼成一条 prompt 交给官方提供方；
+- 「工人」暂时不适用（它自己就是执行者），按钮从「总结并派活」变成「让它直接干活」，
+  点下去它先给四段计划、再直接把活做完；
+- 官方提供方只回传**最终答案**，不回传 token，所以底部金额 / 速度显示「—」；
+- 切回 `DSH 官方` 就恢复原来的领导 + 工人模式，两边的对话记录各自保留（存在
+  `<DSH_HOME>\lead-panel\state.json` 的 `transcripts` 里）。
+
+### 多挂几个「人」
+
+Codex / Claude Code 各自的模型由它们的 profile 行决定（`@deepseek-ai/dsh-subagent-codex` 的
+`model` 配置）。想要面板里出现「Codex · GPT-5.1」「Codex · GPT-5.4」这种多人可选，就在 profile
+里多挂几个 provider 实例（每个用不同的 `providerName` + `model`），它们会各占一个「领导平台」格；
+展示名用插件配置 `leaders` 覆盖：
+
+```yaml
+- id: dsh-lead-panel
+  config:
+    leaders:
+      codex: Codex · GPT（原生配置）
+      codex-gpt54: Codex · GPT-5.4
+      claude-code: Claude Code
+```
+
 ## 安装
 
 ```powershell
@@ -240,8 +282,8 @@ dsh plugin --profile web add D:\1231\dsh-lead-panel
 npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种装法装的是同一份
 代码，装完都要**重启 DSH** 才会加载 Host 半边。
 
-> 想用 `Codex` / `Claude Code` 两种来源，还要按上一节把官方 subagent 提供方挂进 profile、
-> 并在 preset 里启用对应工具行；没装时面板会把这两个来源置灰，其它功能不受影响。
+> 想用 `Codex` / `Claude Code`（无论当工人还是当领导），还要按「把活派给 Codex / Claude Code」
+> 一节把官方 subagent 提供方挂进 profile；没装时面板会把它们置灰，其它功能不受影响。
 
 `patchReload: live` 的 profile 会在 patch 变化时热重载；否则重启 DSH。
 （注意：改 Host 代码后 DSH 会复用已缓存的模块，见文末「改代码时的两个坑」。）
@@ -256,6 +298,8 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
     leadPreset: standard        # 领导会话用哪个 agent preset
     leadModel: { provider: deepseek-official, model: deepseek-flash }
     currency: '¥'
+    leaders:                    # 领导平台展示名（可选，见上一节）
+      codex: Codex · GPT
     prices:                     # 元 / 百万 token，覆盖内置牌价
       deepseek-flash: { input: 2, cacheRead: 0.2, output: 3 }
 ```
@@ -264,13 +308,14 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 工人来源（`harnesses`、`dispatchHarness`） |
-| GET | `/lead-panel/api/health` | 自检：Host 服务可用性（含 `subagents` 提供方列表）、状态文件位置、build 标记 |
+| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 领导平台（`leaders`、`leader`、`leaderKind`、`leaderRun`）/ 工人来源（`harnesses`、`dispatchHarness`） |
+| GET | `/lead-panel/api/health` | 自检：Host 服务可用性（含 `subagents` 提供方列表）、领导平台列表、状态文件位置、build 标记 |
 | GET | `/lead-panel/api/debug-session?id=<会话id>` | 排查：直接读某个会话的持久日志，看能不能算出用量 |
-| POST | `/lead-panel/api/ensure` | 确保领导会话存在（`{reset:true}` 重开） |
+| POST | `/lead-panel/api/ensure` | 确保领导会话存在（`{reset:true}` 重开；外部 harness 模式下同时清空面板对话记录） |
+| POST | `/lead-panel/api/leader` | `{leader}` 切换领导平台，取 `dsh` 或 `harness:<provider>` |
 | POST | `/lead-panel/api/send` | `{text}` 给领导发消息 |
-| POST | `/lead-panel/api/dispatch` | `{text, harness}` 总结并派活；`harness` 取 `team` / `codex` / `claude-code` / `auto`，省略则用上次的选择 |
-| POST | `/lead-panel/api/model` | `{provider, model}` 切换领导模型 |
+| POST | `/lead-panel/api/dispatch` | `{text, harness}` 总结并派活；`harness` 取 `team` / `codex` / `claude-code` / `auto`，省略则用上次的选择。领导是外部 harness 时忽略该字段，直接让它动手 |
+| POST | `/lead-panel/api/model` | `{provider, model}` 切换领导模型（仅 DSH 官方领导可用） |
 | POST | `/lead-panel/api/cancel` | 打断领导当前回合 |
 
 领导会话的 id 存在 `<DSH_HOME>\lead-panel\state.json`，重启 DSH 后复用同一个会话。
@@ -279,17 +324,18 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 ```powershell
 npm test                  # 两个套件一起跑
-node test/self-check.mjs  # 49 项：纯逻辑 + 浏览器半边
-node test/host-smoke.mjs  # 47 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
+node test/self-check.mjs  # 64 项：纯逻辑 + 浏览器半边
+node test/host-smoke.mjs  # 64 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
 ```
 
 - `self-check`：用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖、**四种工人来源的派活指令**、
-  **从 `tool/call` + `tool/result` 还原外部 harness 工人**；以及在假
-  `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
+  **从 `tool/call` + `tool/result` 还原外部 harness 工人**、**领导平台列表与外部 harness 的 prompt
+  拼装**；以及在假 `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
   `conversation.input.left`、组件可构造、防翻译标记在位。
 - `host-smoke`：用假 ctx / 假服务驱动真实处理器，验证 `POST /send`、`/dispatch`
   会给 `sessionController.prompt` 传 `AbortSignal`（曾经漏传，面板点了报
   `throwIfAborted`）、`/dispatch` 按 `harness` 生成不同指令且拒绝未知来源、
+  **`/leader` 切换后 `/send`、`/dispatch` 走官方 subagent 提供方并写回对话记录**、
   `/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志、外部 harness 工人）、
   金额按牌价折算、异常以 JSON 返回。
 
@@ -304,6 +350,9 @@ node test/host-smoke.mjs  # 47 项：假 ctx 把 Host 的 HTTP 链路整条跑�
   subagent 提供方包暴露的工具，本插件不实现任何 harness 逻辑，只负责生成派活指令、并把
   `tool/call` + `tool/result` 还原成「外部工人」显示出来。官方包一次运行只回传最终答案，
   **不回传 token**，所以金额 / 速度只统计领导自己。
+- **外部 harness 当领导是「重放式」的**：官方 subagent 提供方是一次性运行、没有真正的会话
+  记忆。面板每轮把「角色说明 + 历史 + 新消息」重新拼成一条 prompt 发过去，所以历史越长 prompt
+  越大，它也看不到自己上一轮的工具调用细节（只有正文）；要多人协作仍得切回 `DSH 官方`。
 - **Claude Code 需要本机先登录**：官方包调用的是它自己的 CLI；没登录时每次运行都会以
   `product: Claude Code; stage: query-run; invalid-result` 失败，先在终端跑一次 `claude`
   完成登录即可（Codex 同理，需要 `~/.codex/auth.json`）。
