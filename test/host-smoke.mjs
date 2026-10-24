@@ -173,7 +173,8 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-10-24T16:10')
+check('health 带 build 标记', health.body.data.build, '2026-10-24T18:40')
+check('health 报出协作模式', health.body.data.modes, ['single', 'split', 'consult', 'pipeline'])
 checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
 checkTrue('health 报出 subagents 提供方', health.body.data.services.subagentsProviders.includes('codex'))
 checkTrue('health 报出持久化服务可用', health.body.data.services.sessionPersistence)
@@ -270,6 +271,36 @@ check('Codex 领导派活出了计划卡', [harnessAfterDispatch.plan.need, harn
 checkTrue('派活 prompt 带四段格式要求', subagentRuns.at(-1).prompt[0].text.includes('【预计时间】'))
 const modelBlocked = await request('POST', 'model', { provider: 'deepseek-official', model: 'deepseek-flash' })
 check('Codex 领导不能切模型', modelBlocked.status, 500)
+
+// ── 跨平台：分工 / 会诊 / 流水线 ────────────────────────────────────────────
+await request('POST', 'mode', { mode: 'consult' })
+await request('POST', 'picks', { picks: ['dsh', 'codex'] })
+subagentRuns.length = 0
+const consult = await request('POST', 'run', { text: '写个跨平台方案' })
+check('会诊启动 200', consult.status, 200)
+check('会诊排队', consult.body.data.queued, true)
+await new Promise(resolve => setTimeout(resolve, 80))
+const consultState = (await request('GET', 'state')).body.data
+check('会诊模式', consultState.mode, 'consult')
+check('会诊结果两条', consultState.lastRun.entries.map(entry => entry.platform), ['dsh', 'codex'])
+check('会诊结果都完成', consultState.lastRun.entries.every(entry => entry.status === 'done'), true)
+
+await request('POST', 'mode', { mode: 'pipeline' })
+subagentRuns.length = 0
+subagentReply = '这一步的输出'
+await request('POST', 'run', { text: '把这件事做完', picks: ['codex', 'claude-code'] })
+await new Promise(resolve => setTimeout(resolve, 80))
+const pipelineState = (await request('GET', 'state')).body.data
+check('流水线结果两条', pipelineState.lastRun.entries.map(entry => entry.platform), ['codex', 'claude-code'])
+check('流水线按序执行', subagentRuns.length, 2)
+checkTrue('流水线第二步拿到第一步输出', subagentRuns[1].prompt[0].text.includes('这一步的输出'))
+
+const splitBlocked = await request('POST', 'run', { mode: 'split', picks: ['dsh', 'codex'], text: '拆一下' })
+check('分工模式要求 DSH 官方领导', splitBlocked.status, 500)
+await request('POST', 'leader', { leader: 'dsh' })
+const splitOk = await request('POST', 'run', { mode: 'split', picks: ['dsh', 'codex'], text: '分工做' })
+check('切回 DSH 后分工可用', splitOk.status, 200)
+checkTrue('分工指令进了领导会话', prompts.at(-1).request.content[0].text.includes('subagent_codex'))
 
 const missing = await request('GET', 'nope')
 check('未知接口 404', missing.status, 404)

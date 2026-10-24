@@ -43,7 +43,10 @@ token、估算金额、用时和预计剩余时间。
 **领导本身也能换平台**：顶部的「领导平台」可以在 `DSH 官方`、`Codex（GPT）`、`Claude Code`
 之间切换 —— 选外部 harness 时，它就是领导，每轮带着对话历史跑一次，「派活」= 直接让它把活干完。
 
-当前版本 **0.7.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 64 项 + Host 冒烟 64 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+**还能跨平台干活**：顶部的「协作模式」有 `单平台` / `分工` / `会诊` / `流水线` 四种 ——
+同一个任务可以拆给多个平台分工、同时发给多个平台各答一遍对比、或按顺序接力处理。
+
+当前版本 **0.8.0** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 72 项 + Host 冒烟 76 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -58,6 +61,7 @@ token、估算金额、用时和预计剩余时间。
 |---|---|
 | 顶部 | 领导当前状态（运行中 / 空闲）、**「领导平台」切换**（DSH 官方 / Codex / Claude Code，见下一节）、**模型下拉框**（列出本机所有 provider/模型，按 provider 分组、模型全名、当前项打勾，选一下即切换），并常显当前模型 + provider 胶囊 + 推理强度；另有打断、重开 |
 | 领导平台 | `DSH 官方` / `Codex（GPT）` / `Claude Code` 三选一。DSH 官方是普通会话（模型可切、能组队派活）；外部 harness 让它自己当领导，每轮带着对话历史跑一次，派活 = 直接动手 |
+| 协作模式 | `单平台` / `分工` / `会诊` / `流水线` 四选一，下面跟着一句说明；非单平台模式会出现「参与平台」多选（DSH 官方 / Codex / Claude Code），结果区按平台列出状态、耗时与答复 |
 | 工人来源 | `官方团队` / `Codex` / `Claude Code` / `自动选` 四选一。没装官方提供方的来源会置灰，鼠标悬停有提示；选择记在 Host 里，下次打开面板还是它 |
 | 计划卡 | 领导总结的四段：`【需求】【效果】【分工】【预计时间】`，自动抽成卡片 |
 | 中部 | 与领导的对话；助手消息下面挂它调用的工具名（`spawn_teammate`、`subagent_codex` 等） |
@@ -259,6 +263,25 @@ Codex / Claude Code 各自的模型由它们的 profile 行决定（`@deepseek-a
       claude-code: Claude Code
 ```
 
+## 跨平台协作：分工 / 会诊 / 流水线（0.8.0 新增）
+
+![跨平台模式：流水线跑完，DSH 与 Codex 各出一段结果](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-collab.png)
+
+面板顶部的「协作模式」有四种，点一下就切换，模式下面会自动跟一句说明：
+
+| 模式 | 干什么 | 适合 |
+|---|---|---|
+| `单平台` | 原来的用法：领导（任意平台）聊天 / 派活给一个工人来源 | 日常 |
+| `分工` | 领导（DSH 官方）把同一个任务拆给勾选的多个平台，各干一部分，最后汇总 | 一个任务里有代码、审阅、并行子任务 |
+| `会诊` | 同一个任务**同时**发给勾选的每个平台各做一遍，结果并排对比 | 拿不准谁做得更好 / 想要多方案 |
+| `流水线` | 按勾选顺序**依次**执行，上一步结果作为下一步输入 | 实现 → 审阅 → 验证这类接力 |
+
+- 参与平台：`DSH 官方` / `Codex` / `Claude Code`，没挂载的会自动置灰；会诊、流水线至少勾一个，分工建议勾两个以上。
+- 会诊是**并行**跑的（谁先完成都行）；流水线是**严格串行**，出结果的顺序就是勾选顺序。
+- 结果区显示每个平台的状态、耗时和最终答复；跑完会存进状态文件，面板刷新后还在（「重开」会清掉）。
+- 外部平台仍由官方 subagent 提供方执行、不回传 token，所以 token / 金额只统计 DSH 自己的部分。
+- **分工模式要求领导是 `DSH 官方`**（只有它手里有 Agent Teams 和 harness 工具）；会诊、流水线不限制领导平台。
+
 ## 安装
 
 ```powershell
@@ -308,11 +331,14 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 领导平台（`leaders`、`leader`、`leaderKind`、`leaderRun`）/ 工人来源（`harnesses`、`dispatchHarness`） |
+| GET | `/lead-panel/api/state` | 面板轮询：消息 / 计划 / 工人 / 用量 / 模型清单 / 领导平台（`leaders`、`leader`、`leaderKind`、`leaderRun`）/ 协作模式（`modes`、`mode`、`platforms`、`picks`、`lastRun`）/ 工人来源（`harnesses`、`dispatchHarness`） |
 | GET | `/lead-panel/api/health` | 自检：Host 服务可用性（含 `subagents` 提供方列表）、领导平台列表、状态文件位置、build 标记 |
 | GET | `/lead-panel/api/debug-session?id=<会话id>` | 排查：直接读某个会话的持久日志，看能不能算出用量 |
 | POST | `/lead-panel/api/ensure` | 确保领导会话存在（`{reset:true}` 重开；外部 harness 模式下同时清空面板对话记录） |
 | POST | `/lead-panel/api/leader` | `{leader}` 切换领导平台，取 `dsh` 或 `harness:<provider>` |
+| POST | `/lead-panel/api/mode` | `{mode}` 切换协作模式：`single` / `split` / `consult` / `pipeline` |
+| POST | `/lead-panel/api/picks` | `{picks}` 选择参与平台：`dsh` / `codex` / `claude-code`（顺序即流水线顺序） |
+| POST | `/lead-panel/api/run` | `{text, mode?, picks?}` 执行分工 / 会诊 / 流水线；会诊与流水线在后台跑，轮询 `/state` 的 `lastRun` |
 | POST | `/lead-panel/api/send` | `{text}` 给领导发消息 |
 | POST | `/lead-panel/api/dispatch` | `{text, harness}` 总结并派活；`harness` 取 `team` / `codex` / `claude-code` / `auto`，省略则用上次的选择。领导是外部 harness 时忽略该字段，直接让它动手 |
 | POST | `/lead-panel/api/model` | `{provider, model}` 切换领导模型（仅 DSH 官方领导可用） |
@@ -324,18 +350,20 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 ```powershell
 npm test                  # 两个套件一起跑
-node test/self-check.mjs  # 64 项：纯逻辑 + 浏览器半边
-node test/host-smoke.mjs  # 64 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
+node test/self-check.mjs  # 72 项：纯逻辑 + 浏览器半边
+node test/host-smoke.mjs  # 76 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
 ```
 
 - `self-check`：用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖、**四种工人来源的派活指令**、
   **从 `tool/call` + `tool/result` 还原外部 harness 工人**、**领导平台列表与外部 harness 的 prompt
-  拼装**；以及在假 `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
+  拼装**、**跨平台三种模式的分工指令 / 会诊 prompt / 流水线交接 prompt**；以及在假
+  `window.__ModuleLoader__` + 假 `react` 下求值 `lib/client.js`，确认它注册到
   `conversation.input.left`、组件可构造、防翻译标记在位。
 - `host-smoke`：用假 ctx / 假服务驱动真实处理器，验证 `POST /send`、`/dispatch`
   会给 `sessionController.prompt` 传 `AbortSignal`（曾经漏传，面板点了报
   `throwIfAborted`）、`/dispatch` 按 `harness` 生成不同指令且拒绝未知来源、
   **`/leader` 切换后 `/send`、`/dispatch` 走官方 subagent 提供方并写回对话记录**、
+  **`/mode` + `/picks` + `/run` 的会诊（并行）、流水线（串行、交接上一步输出）、分工（要求 DSH 领导）**、
   `/state` 能抽出计划卡片与工人用量（含已卸载工人读持久日志、外部 harness 工人）、
   金额按牌价折算、异常以 JSON 返回。
 
@@ -353,6 +381,9 @@ node test/host-smoke.mjs  # 64 项：假 ctx 把 Host 的 HTTP 链路整条跑�
 - **外部 harness 当领导是「重放式」的**：官方 subagent 提供方是一次性运行、没有真正的会话
   记忆。面板每轮把「角色说明 + 历史 + 新消息」重新拼成一条 prompt 发过去，所以历史越长 prompt
   越大，它也看不到自己上一轮的工具调用细节（只有正文）；要多人协作仍得切回 `DSH 官方`。
+- **跨平台模式也都是「一次性运行」拼起来的**：会诊并行、流水线串行、分工靠 DSH 领导调官方工具；
+  每个外部平台都是一次独立 subagent 运行，没有共享上下文——流水线是把上一步的最终答复手写进
+  下一步的 prompt，会诊则是让各平台独立作答。它们都不会回传 token，金额只覆盖 DSH 自己的部分。
 - **Claude Code 需要本机先登录**：官方包调用的是它自己的 CLI；没登录时每次运行都会以
   `product: Claude Code; stage: query-run; invalid-result` 失败，先在终端跑一次 `claude`
   完成登录即可（Codex 同理，需要 `~/.codex/auth.json`）。

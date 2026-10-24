@@ -35,6 +35,7 @@ const {
   foldUsage, usageIsEmpty, extractPlan, costOf, addUsage, readMessagesFromEvents,
   normalizeConfig, priceOf, dispatchInstruction, externalWorkersFromEvents, parseToolArguments,
   HARNESS_MODES, leaderOptions, buildLeaderPrompt, LEADER_DSH, DEFAULT_LEADER_LABELS,
+  COLLAB_MODES, normalizePicks, picksOf, dispatchInstructionFor, buildConsultPrompt, buildPipelinePrompt,
 } = internals
 
 // ── 1) 用量折叠：四个桶互不重叠，按事件累加 ─────────────────────────────────
@@ -149,7 +150,18 @@ checkTrue('派活 prompt 要求四段格式', leaderPrompt.includes('【需求�
 checkTrue('派活 prompt 要求直接动手', leaderPrompt.includes('直接动手'))
 check('闲聊 prompt 不带派活要求', buildLeaderPrompt('Codex', [], '你好', false).includes('【需求】'), false)
 
-// ── 8) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
+// ── 8) 跨平台协作：分工 / 会诊 / 流水线 ────────────────────────────────────
+check('勾选去重/过滤', normalizePicks(['codex', 'nope', 'codex', 'dsh', 1]), ['codex', 'dsh'])
+check('默认勾选 DSH', picksOf({}), ['dsh'])
+const splitInstruction = dispatchInstructionFor(['dsh', 'codex', 'claude-code'])
+checkTrue('分工指令点名三个平台', splitInstruction.includes('spawn_teammate') && splitInstruction.includes('subagent_codex') && splitInstruction.includes('subagent_claude_code'))
+checkTrue('分工指令带四段格式', splitInstruction.includes('【需求】'))
+checkTrue('会诊 prompt 带任务', buildConsultPrompt('Codex', '写个 README').includes('写个 README'))
+checkTrue('流水线第一步要交接', buildPipelinePrompt('Codex', 1, 2, '任务', '').includes('交接'))
+checkTrue('流水线后续步带上一步输出', buildPipelinePrompt('Claude Code', 2, 2, '任务', '上一步做了 X').includes('上一步做了 X'))
+check('协作模式四种', COLLAB_MODES.map(mode => mode.id), ['single', 'split', 'consult', 'pipeline'])
+
+// ── 9) 浏览器半边：假 loader + 假 react 下能否注册槽位 ─────────────────────
 const clientSource = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 let registration = null
 const fakeWindow = { __ModuleLoader__: { load: (entry) => { registration = entry } } }

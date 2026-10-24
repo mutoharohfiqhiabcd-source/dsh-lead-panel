@@ -81,6 +81,189 @@ function dispatchInstruction(harness) {
   return `${PLAN_SPEC}${HARNESS_RULES[mode.id]}\n\n用户的原始需求如下：\n`
 }
 
+// ── 跨平台协作（0.8.0）：分工 / 会诊 / 流水线 ────────────────────────────────
+//
+// 统一的一套「平台」概念：DSH 官方（Agent Teams / spawn 子代理）、Codex、Claude Code。
+//   · 分工   —— 领导（DSH）把同一任务拆给勾选的多个平台里的工人，最后汇总；
+//   · 会诊   —— 同一任务同时发给勾选的每个平台各做一遍，结果并排展示；
+//   · 流水线 —— 按勾选顺序依次执行，上一步结果作为下一步的输入。
+// 外部平台都走官方 subagent 提供方的一次性运行；面板只负责编排与展示。
+
+const COLLAB_MODES = [
+  { id: 'single', label: '单平台', hint: '原来的用法：领导（任意平台）聊天；DSH 领导还能派给一个工人来源。' },
+  { id: 'split', label: '分工', hint: '领导（DSH 官方）把同一个任务拆给勾选的多个平台，各干一部分，最后汇总。' },
+  { id: 'consult', label: '会诊', hint: '同一个任务同时发给勾选的每个平台，各答一遍，并排对比结果。' },
+  { id: 'pipeline', label: '流水线', hint: '按勾选顺序依次执行：上一步的结果会作为下一步的输入。' },
+]
+
+const COLLAB_PLATFORMS = [
+  { id: 'dsh', label: 'DSH 官方', provider: 'spawn' },
+  { id: 'codex', label: 'Codex', provider: 'codex' },
+  { id: 'claude-code', label: 'Claude Code', provider: 'claude-code' },
+]
+
+/** 分工模式里每个平台该干什么（拼进派活指令）。 */
+const SPLIT_RULES = {
+  dsh: '用 spawn_teammate 组队，负责需要多步骤/可并行的部分',
+  codex: '用 subagent_codex 跑一次单点硬活（代码改动、命令、构建测试）',
+  'claude-code': '用 subagent_claude_code 跑一次审阅/长文本/重构这类任务',
+}
+
+/** 当前正在跑的会诊 / 流水线（进程内状态）。 */
+let activeCollabRun = null
+
+function collabModeOf(state) {
+  return COLLAB_MODES.some(mode => mode.id === state.mode) ? state.mode : 'single'
+}
+
+/** 规范勾选：去重、只留已知平台、保持给定顺序。 */
+function normalizePicks(picks) {
+  const out = []
+  for (const id of Array.isArray(picks) ? picks : []) {
+    if (typeof id !== 'string') continue
+    if (!COLLAB_PLATFORMS.some(platform => platform.id === id)) continue
+    if (!out.includes(id)) out.push(id)
+  }
+  return out
+}
+
+function picksOf(state) {
+  const picks = normalizePicks(state.picks)
+  return picks.length > 0 ? picks : ['dsh']
+}
+
+/** 分工模式：勾选平台 → 一条多平台派活指令。 */
+function dispatchInstructionFor(picks) {
+  const list = normalizePicks(picks)
+  if (list.length === 0) return dispatchInstruction('team')
+  if (list.length === 1) {
+    const one = list[0]
+    if (one === 'dsh') return dispatchInstruction('team')
+    return dispatchInstruction(one)
+  }
+  const lines = list.map(id => `- ${COLLAB_PLATFORMS.find(platform => platform.id === id)?.label ?? id}：${SPLIT_RULES[id] ?? ''}`).join('\n')
+  return `${PLAN_SPEC}
+这次是「跨平台分工」：同一件事必须同时用到下面这些平台，各负责一部分：
+
+${lines}
+
+派活要求：先把分工写清楚（谁做什么、边界在哪、验收标准是什么），然后同一回合内真的把活派出去——DSH 部分用 spawn_teammate，Codex 用 subagent_codex，Claude Code 用 subagent_claude_code；能并行的并行；最后汇总各平台的结果一起汇报。
+
+用户的原始需求如下：
+`
+}
+
+/** 会诊：每个平台独立回答同一个任务。 */
+function buildConsultPrompt(label, task) {
+  return `你是参与「同题会诊」的独立专家之一（平台：${label}）。所有平台拿到的是同一个任务，请独立给出你的方案/结论。
+要求：中文；先给结论，再给关键步骤或代码要点；控制在 400 字以内；不要提及其它平台。
+
+===== 任务 =====
+${task}`
+}
+
+/** 流水线：上一步的输出成为下一步的输入。 */
+function buildPipelinePrompt(label, step, total, task, previous) {
+  const head = `你是「跨平台流水线」的第 ${step}/${total} 步（平台：${label}）。\n用户的总任务：\n${task}\n`
+  if (!previous) {
+    return `${head}\n你是第一步：先拆解任务并完成你能做的部分，给下一步留一段清晰的交接说明（做了什么、还剩什么、下一步该干嘛）。`
+  }
+  return `${head}\n上一步的输出：\n${previous}\n\n请接着做你这一步：验证/补全上一步的结果，能收尾就收尾；最后给出这一步的交接说明或最终结果。`
+}
+
+/** 跑一个平台的一次性任务（官方 subagent 提供方）。 */
+async function runOneShotPlatform(ctx, options, platformId, prompt, signal) {
+  const s = services(ctx)
+  const platform = COLLAB_PLATFORMS.find(item => item.id === platformId)
+  if (!platform) throw new Error(`未知平台：${platformId}`)
+  if (!s.subagents) throw new Error('subagents 服务不可用（需要官方 subagent 提供方）')
+  const parent = await parentAgentForLeader(ctx, options)
+  const run = await s.subagents.start(platform.provider, {
+    label: `${platform.label} · 跨平台`,
+    prompt: [{ type: 'text', text: prompt }],
+    parent,
+    signal,
+  })
+  try {
+    const result = await run.result
+    const text = textOf(result.output).trim()
+    return {
+      ok: result.stopReason === 'completed',
+      text: text || '',
+      diagnostic: result.diagnostic,
+      stopReason: result.stopReason,
+    }
+  } finally {
+    try { await run.dispose() } catch { /* 结束后的 dispose 是幂等的 */ }
+  }
+}
+
+/** 把某次跨平台运行写进状态文件（面板刷新 / 重启后还能看到结果）。 */
+function persistCollabRun(mode, task, startedAt, entries, finished) {
+  writeState({
+    lastRun: {
+      mode,
+      task,
+      startedAt,
+      finishedAt: finished ? Date.now() : null,
+      entries: entries.map(entry => ({
+        platform: entry.platform,
+        label: entry.label,
+        status: entry.status,
+        elapsedMs: entry.elapsedMs ?? 0,
+        text: String(entry.text ?? '').slice(0, 4000),
+        diagnostic: entry.diagnostic ? String(entry.diagnostic).slice(0, 500) : undefined,
+      })),
+    },
+  })
+}
+
+/** 启动一次会诊 / 流水线（后台跑，面板轮询状态）。 */
+async function startCollabRun(ctx, options, mode, task, picks) {
+  const list = normalizePicks(picks)
+  if (list.length === 0) throw new Error('至少勾选一个平台')
+  const entries = list.map(id => ({
+    platform: id,
+    label: COLLAB_PLATFORMS.find(platform => platform.id === id)?.label ?? id,
+    status: 'queued',
+    elapsedMs: 0,
+    text: '',
+  }))
+  const startedAt = Date.now()
+  const controllers = entries.map(() => new AbortController())
+  activeCollabRun = { mode, task, startedAt, entries, controllers }
+  persistCollabRun(mode, task, startedAt, entries, false)
+  const runOne = async (entry, index, prompt) => {
+    entry.status = 'running'
+    persistCollabRun(mode, task, startedAt, entries, false)
+    try {
+      const out = await runOneShotPlatform(ctx, options, entry.platform, prompt, controllers[index].signal)
+      entry.text = out.text || (out.ok ? '（没有输出）' : '（运行未正常结束）')
+      entry.status = out.ok ? 'done' : 'failed'
+      if (!out.ok && out.diagnostic) entry.diagnostic = out.diagnostic
+    } catch (error) {
+      entry.status = 'failed'
+      entry.text = describeError(error)
+    }
+    entry.elapsedMs = Date.now() - startedAt
+    persistCollabRun(mode, task, startedAt, entries, false)
+  }
+  try {
+    if (mode === 'consult') {
+      await Promise.all(entries.map((entry, index) => runOne(entry, index, buildConsultPrompt(entry.label, task))))
+    } else {
+      let previous = ''
+      for (const [index, entry] of entries.entries()) {
+        await runOne(entry, index, buildPipelinePrompt(entry.label, index + 1, entries.length, task, previous))
+        if (entry.status === 'done') previous = entry.text
+      }
+    }
+  } finally {
+    activeCollabRun = null
+    persistCollabRun(mode, task, startedAt, entries, true)
+  }
+}
+
 // ── 领导平台：DSH 官方会话，或外部 harness（Codex / Claude Code）────────────────
 //
 // DSH 的会话只能跑 DSH 自己的 LLM；Codex / Claude Code 是通过官方 subagent
@@ -779,6 +962,38 @@ const PANEL_SERVICES = s => ({
   subagents: Boolean(s.subagents),
 })
 
+/** 跨平台运行状态：正在跑的优先，否则读上次结果。 */
+function collabRunState(state) {
+  if (activeCollabRun) {
+    return {
+      mode: activeCollabRun.mode,
+      task: activeCollabRun.task,
+      startedAt: activeCollabRun.startedAt,
+      finishedAt: null,
+      running: true,
+      entries: activeCollabRun.entries,
+    }
+  }
+  const last = state.lastRun
+  if (!last || !Array.isArray(last.entries) || last.entries.length === 0) return null
+  return { ...last, running: false }
+}
+
+/** 跨平台面板共有的字段。 */
+function collabStateOf(s, state, providerNames) {
+  return {
+    mode: collabModeOf(state),
+    modes: COLLAB_MODES.map(({ id, label, hint }) => ({ id, label, hint })),
+    picks: picksOf(state),
+    platforms: COLLAB_PLATFORMS.map(platform => ({
+      id: platform.id,
+      label: platform.label,
+      available: platform.id === 'dsh' ? Boolean(s.controller) : providerNames.has(platform.provider),
+    })),
+    lastRun: collabRunState(state),
+  }
+}
+
 /** 面板要的全部状态。 */
 async function collectState(ctx, options) {
   const s = services(ctx)
@@ -804,6 +1019,7 @@ async function collectState(ctx, options) {
       sessionTitle: state.title ?? options.title,
       leader: leader.id,
       leaderKind: 'harness',
+      ...collabStateOf(s, state, providerNames),
       leaders: leaders.map(({ id, kind, provider, label, available }) => ({ id, kind, provider, label, available })),
       leaderRun: running && activeLeaderRun
         ? { label: activeLeaderRun.label, dispatch: activeLeaderRun.dispatch, elapsedMs: Date.now() - activeLeaderRun.startedAt }
@@ -867,6 +1083,7 @@ async function collectState(ctx, options) {
     sessionTitle: state.title ?? options.title,
     leader: leader.id,
     leaderKind: 'dsh',
+    ...collabStateOf(s, state, providerNames),
     leaders: leaders.map(({ id, kind, provider, label, available }) => ({ id, kind, provider, label, available })),
     leaderRun: null,
     running,
@@ -902,7 +1119,7 @@ function createApiHandler(ctx, options) {
     try { url = new URL(String(req.url), 'http://localhost') } catch { sendJson(res, 400, { ok: false, error: '非法 URL' }); return }
     const action = url.pathname.slice(options.route.length).replace(/^\//, '')
     const method = String(req.method ?? 'GET').toUpperCase()
-    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'cancel', 'leader'])
+    const postOnly = new Set(['ensure', 'send', 'dispatch', 'model', 'cancel', 'leader', 'mode', 'picks', 'run'])
     if (postOnly.has(action) ? method !== 'POST' : method !== 'GET') {
       sendJson(res, 405, { ok: false, error: `不支持的方法 ${method}` })
       return
@@ -920,12 +1137,14 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-10-24T16:10',
+              build: '2026-10-24T18:40',
               route: options.route,
               statePath: statePath(),
               state: readState(),
               harnesses: HARNESS_MODES.map(mode => mode.id),
               leaders: leaderOptions(s, options).map(item => item.id),
+              modes: COLLAB_MODES.map(mode => mode.id),
+              platforms: COLLAB_PLATFORMS.map(platform => platform.id),
               services: {
                 sessionController: Boolean(s.controller),
                 llm: Boolean(s.llm),
@@ -980,6 +1199,7 @@ function createApiHandler(ctx, options) {
               delete all[leader.id]
               writeState({ transcripts: all })
             }
+            writeState({ lastRun: null })
           }
           const result = await ensureLead(ctx, options, reset)
           sendJson(res, 200, { ok: true, data: result })
@@ -1034,6 +1254,48 @@ function createApiHandler(ctx, options) {
           sendJson(res, 200, { ok: true, data: { leader: picked.id, label: picked.label } })
           return
         }
+        case 'mode': {
+          const body = await readJsonBody(req)
+          const mode = String(body.mode ?? '').trim()
+          if (!COLLAB_MODES.some(item => item.id === mode)) throw new Error(`未知的协作模式：${mode}`)
+          writeState({ mode })
+          sendJson(res, 200, { ok: true, data: { mode } })
+          return
+        }
+        case 'picks': {
+          const body = await readJsonBody(req)
+          const picks = normalizePicks(body.picks)
+          if (picks.length === 0) throw new Error('至少勾选一个平台')
+          writeState({ picks })
+          sendJson(res, 200, { ok: true, data: { picks } })
+          return
+        }
+        case 'run': {
+          const s = services(ctx)
+          const body = await readJsonBody(req)
+          const stateNow = readState()
+          const mode = String(body.mode ?? '').trim() || collabModeOf(stateNow)
+          const asked = normalizePicks(body.picks)
+          const picks = asked.length > 0 ? asked : picksOf(stateNow)
+          const task = String(body.text ?? '').trim()
+          if (!task) throw new Error('任务内容为空')
+          if (mode === 'single' || !COLLAB_MODES.some(item => item.id === mode)) {
+            throw new Error('「单平台」模式请直接用「总结并派活」或「发送」')
+          }
+          writeState({ mode, picks })
+          if (mode === 'split') {
+            const leader = resolveLeader(s, options)
+            if (leader.kind !== 'dsh') throw new Error('分工模式需要 DSH 官方当领导（先把「领导平台」切回 DSH 官方）')
+            const result = await sendToLead(ctx, options, `${dispatchInstructionFor(picks)}${task}`)
+            writeState({ jobStartedAt: Date.now() })
+            sendJson(res, 200, { ok: true, data: { sessionId: result.sessionId, mode, picks } })
+            return
+          }
+          if (activeCollabRun) throw new Error('已经有一次会诊 / 流水线在跑：等它结束，或点「打断」')
+          void startCollabRun(ctx, options, mode, task, picks)
+          sendJson(res, 200, { ok: true, data: { mode, picks, queued: true } })
+          return
+        }
         case 'model': {
           const s = services(ctx)
           if (!s.controller) throw new Error('sessionController 服务不可用')
@@ -1052,6 +1314,11 @@ function createApiHandler(ctx, options) {
         }
         case 'cancel': {
           const s = services(ctx)
+          if (activeCollabRun) {
+            for (const controller of activeCollabRun.controllers) controller.abort()
+            sendJson(res, 200, { ok: true, data: { cancelled: true, mode: activeCollabRun.mode } })
+            return
+          }
           const leader = resolveLeader(s, options)
           if (leader.kind === 'harness') {
             if (activeLeaderRun && activeLeaderRun.leaderId === leader.id) {
@@ -1105,6 +1372,13 @@ export const internals = {
   appendTranscript,
   LEADER_DSH,
   DEFAULT_LEADER_LABELS,
+  COLLAB_MODES,
+  COLLAB_PLATFORMS,
+  normalizePicks,
+  picksOf,
+  dispatchInstructionFor,
+  buildConsultPrompt,
+  buildPipelinePrompt,
 }
 
 export function apply(ctx, config) {
