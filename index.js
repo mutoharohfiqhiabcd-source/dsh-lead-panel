@@ -566,6 +566,23 @@ function findExecutable(names, extra = []) {
   return found[0] ?? null
 }
 
+/**
+ * 可执行文件的短缓存：面板每 2.5s 轮询一次 /state，每次都扫 PATH + 安装目录纯属浪费。
+ * 60s 内复用；找不到也缓存，避免反复 stat 不存在的路径。
+ */
+const binCache = new Map()
+const BIN_CACHE_TTL_MS = 60_000
+
+function cachedBin(kind, finder) {
+  const now = Date.now()
+  const hit = binCache.get(kind)
+  if (hit && now - hit.at < BIN_CACHE_TTL_MS) return hit.value
+  let value = null
+  try { value = finder() } catch { value = null }
+  binCache.set(kind, { at: now, value })
+  return value
+}
+
 /** Codex 的 CLI：优先桌面版自带的 codex.exe，其次 PATH 里的。 */
 function findCodexBin() {
   const extra = []
@@ -632,14 +649,35 @@ function harnessAppInfo(app) {
   if (info.model && !info.models.some(item => item.id === info.model)) {
     info.models.unshift({ id: info.model, name: info.model })
   }
-  const bin = app.id === 'codex' ? findCodexBin() : app.id === 'claude-code' ? findClaudeBin() : null
+  const bin = app.id === 'codex'
+    ? cachedBin('codex', findCodexBin)
+    : app.id === 'claude-code'
+      ? cachedBin('claude-code', findClaudeBin)
+      : null
   info.bin = bin
   info.canOpen = Boolean(bin)
   return info
 }
 
+/**
+ * 外部 harness 快照的短缓存：一次轮询里配置读两遍、模型目录 stat 多次都不划算。
+ * 「换模型」写盘后会主动失效，所以面板看到的一定是新值。
+ */
+const harnessAppsCache = { at: 0, key: '', apps: null }
+const HARNESS_APPS_TTL_MS = 5_000
+
+function invalidateHarnessAppsCache() {
+  harnessAppsCache.at = 0
+  harnessAppsCache.apps = null
+}
+
 /** 可编辑模型的外部 harness 快照；提供方没注册就不出现。 */
 function harnessAppsOf(providerNames) {
+  const key = [...providerNames].sort().join(',')
+  const now = Date.now()
+  if (harnessAppsCache.apps && harnessAppsCache.key === key && now - harnessAppsCache.at < HARNESS_APPS_TTL_MS) {
+    return harnessAppsCache.apps
+  }
   const out = {}
   for (const app of HARNESS_APPS) {
     if (!providerNames.has(app.id)) continue
@@ -649,6 +687,9 @@ function harnessAppsOf(providerNames) {
       out[app.id] = { id: app.id, label: app.label, error: describeError(error), canOpen: false, models: [] }
     }
   }
+  harnessAppsCache.at = now
+  harnessAppsCache.key = key
+  harnessAppsCache.apps = out
   return out
 }
 
@@ -669,6 +710,7 @@ function writeHarnessModel(platform, model) {
   if (next !== raw) {
     try { writeFileSync(`${configPath}.lead-panel.bak`, raw, 'utf8') } catch { /* 备份失败也照写，别把人卡住 */ }
     writeFileSync(configPath, next, 'utf8')
+    invalidateHarnessAppsCache()
   }
   return {
     platform: app.id,
@@ -1149,9 +1191,15 @@ function costOf(usage, price) {
     + num(usage.outputTokens) * price.output) / 1_000_000
 }
 
+/** 模型清单的缓存：provider / 模型表不会每 2.5s 变一次，轮询没必要反复问。 */
+const modelsCache = { at: 0, value: null }
+const MODELS_CACHE_TTL_MS = 60_000
+
 /** 领导 + 工人的模型清单（provider 分组），供面板下拉框用。 */
 async function listModels(s) {
   if (!s.llm) return { groups: [], default: null }
+  const now = Date.now()
+  if (modelsCache.value && now - modelsCache.at < MODELS_CACHE_TTL_MS) return modelsCache.value
   const groups = []
   const failures = []
   let providers = []
@@ -1169,7 +1217,10 @@ async function listModels(s) {
       failures.push({ id: provider.id, message: describeError(error) })
     }
   }
-  return { groups, failures }
+  const result = { groups, failures }
+  modelsCache.at = now
+  modelsCache.value = result
+  return result
 }
 
 function modelSelectionOf(projections, session) {
@@ -1283,7 +1334,16 @@ async function collectState(ctx, options) {
   const s = services(ctx)
   const state = readState()
   const leaders = leaderOptions(s, options)
-  const leader = leaders.find(item => item.id === state.leader) ?? leaders[0]
+  let leader = leaders.find(item => item.id === state.leader) ?? leaders[0]
+  // 自愈（0.9.2）：旧版本可能在「分工」模式下把领导留在外部 harness，
+  // 而分工只有 DSH 官方能做 —— 那时面板连「领导平台」都不显示，是个死路。
+  if (collabModeOf(state) === 'split' && leader.kind !== 'dsh') {
+    const dshLeader = leaders.find(item => item.kind === 'dsh')
+    if (dshLeader) {
+      leader = dshLeader
+      try { writeState({ leader: LEADER_DSH }) } catch { /* 状态文件写失败不影响这次显示 */ }
+    }
+  }
   const harnessLeader = leader.kind === 'harness'
   /** 已注册的外部 harness 提供方（Codex / Claude Code 由官方包注册到 ctx.subagents）。 */
   const providerNames = new Set((() => {
@@ -1425,7 +1485,7 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-10-24T16:25',
+              build: '2026-11-01T01:30',
               route: options.route,
               statePath: statePath(),
               state: readState(),
@@ -1561,7 +1621,16 @@ function createApiHandler(ctx, options) {
           const mode = String(body.mode ?? '').trim()
           if (!COLLAB_MODES.some(item => item.id === mode)) throw new Error(`未知的协作模式：${mode}`)
           writeState({ mode })
-          sendJson(res, 200, { ok: true, data: { mode } })
+          // 「分工」只有 DSH 官方能做：切进来时顺手把领导切回 DSH，避免留下无法执行的组合。
+          let leader = null
+          if (mode === 'split') {
+            const current = resolveLeader(services(ctx), options)
+            if (current.kind !== 'dsh') {
+              writeState({ leader: LEADER_DSH })
+              leader = LEADER_DSH
+            }
+          }
+          sendJson(res, 200, { ok: true, data: leader ? { mode, leader, switched: true } : { mode } })
           return
         }
         case 'picks': {

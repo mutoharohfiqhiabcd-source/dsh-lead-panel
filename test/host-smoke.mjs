@@ -105,6 +105,7 @@ const sessions = new Map([
 const prompts = []
 const selected = []
 const subagentRuns = []
+let modelCalls = 0
 let subagentReply = '（默认外部 harness 回复）'
 const persisted = {
   [WORKER_COLD]: [
@@ -126,7 +127,7 @@ const ctx = {
     },
     llm: {
       listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
-      listModels: async () => [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }],
+      listModels: async () => { modelCalls += 1; return [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }] },
     },
     sessions: { get: id => sessions.get(id) ?? null },
     agents: { get: id => (id === LEAD ? { id: LEAD, session: sessions.get(LEAD), status: 'idle' } : undefined) },
@@ -192,7 +193,7 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-10-24T16:25')
+check('health 带 build 标记', health.body.data.build, '2026-11-01T01:30')
 check('health 报出协作模式', health.body.data.modes, ['single', 'split', 'consult', 'pipeline'])
 checkTrue('health 带外部 harness 配置快照', Boolean(health.body.data.harnessApps.codex))
 checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
@@ -259,6 +260,11 @@ const expectedCost = (3700 * 2 + 9100 * 0.2 + 1000 * 3) / 1_000_000
 check('state 金额估算', Math.abs(data.usage.cost - expectedCost) < 1e-9, true)
 check('state 速度（tok/s）', Math.round(data.usage.tokensPerSecond), 200)
 check('state 进度', data.progress, { done: 2, total: 3 })
+// 0.9.2 优化：模型清单进缓存，连续轮询不再反复问 provider
+const modelCallsBefore = modelCalls
+await request('GET', 'state')
+await request('GET', 'state')
+check('连续两次轮询复用模型清单缓存', modelCalls, modelCallsBefore)
 // 外部 harness 的原生配置（面板「领导模型」/「打开平台」用）
 check('state 带 Codex 配置快照', [data.harnessApps.codex.model, data.harnessApps.codex.configExists], ['deepseek-v4-flash', true])
 check('state 给出 Codex 模型快捷选项', data.harnessApps.codex.models.map(model => model.id), ['deepseek-v4-flash', 'deepseek-v4-pro'])
@@ -350,6 +356,14 @@ checkTrue('分工指令进了领导会话', prompts.at(-1).request.content[0].te
 
 const missing = await request('GET', 'nope')
 check('未知接口 404', missing.status, 404)
+
+// 0.9.2 修复：切到「分工」时自动把领导切回 DSH 官方（旧版本会留下一组永远派不出去的组合）
+await request('POST', 'leader', { leader: 'harness:codex' })
+const splitMode = await request('POST', 'mode', { mode: 'split' })
+check('分工模式自动切回 DSH 领导', splitMode.body.data.leader, 'dsh')
+const splitModeState = (await request('GET', 'state')).body.data
+check('分工模式下状态里的领导是 DSH', splitModeState.leader, 'dsh')
+check('分工模式下领导平台仍可看见（不再整行消失）', splitModeState.leaders.map(item => item.id), ['dsh', 'harness:codex', 'harness:claude-code'])
 
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)

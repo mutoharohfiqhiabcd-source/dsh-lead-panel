@@ -50,7 +50,7 @@ token、估算金额、用时和预计剩余时间。
 模型，选一下就能换（下一条回复生效），旁边还有「打开 Codex」「配置」两个按钮——
 一键进它自己的界面，或直接改它的配置文件。
 
-当前版本 **0.9.1** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 96 项 + Host 冒烟 92 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+当前版本 **0.9.2** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 100 项 + Host 冒烟 96 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -286,6 +286,7 @@ DSH 官方本来就带两个 subagent 提供方包：
 - 结果区显示每个平台的状态、耗时和最终答复；跑完会存进状态文件，面板刷新后还在（「重开」会清掉）。
 - 外部平台仍由官方 subagent 提供方执行、不回传 token，所以 token / 金额只统计 DSH 自己的部分。
 - **分工模式要求领导是 `DSH 官方`**（只有它手里有 Agent Teams 和 harness 工具）；会诊、流水线不限制领导平台。
+  0.9.2 起切到分工时会自动把领导切回 DSH 官方，外部平台在分工模式下会置灰并说明原因。
 
 ## 换外部领导的模型 + 一键打开它（0.9.0 新增）
 
@@ -321,6 +322,18 @@ DSH 官方本来就带两个 subagent 提供方包：
 - 工人来源选到 Codex / Claude Code 时，下面也会多一行「工人模型」，同样可换、可打开。
 - 「打开」走 `cmd /c start`，只支持 Windows；接口只认白名单里的平台与动作，且只允许本机访问。
 - 面板仍然只做「读一个字段 / 写一个字段 / 起一个进程」，harness 逻辑还是官方的。
+
+## 0.9.2 优化：分工模式不再有死路，空闲轮询也变慢
+
+![分工模式：领导平台不再整行消失，外部平台置灰（切进来时已自动切回 DSH 官方）](https://raw.githubusercontent.com/mutoharohfiqabcd-source/dsh-lead-panel/main/images/panel-split-leader.png)
+
+- **分工模式也能看到「领导平台」**：以前切到分工后领导平台整行消失，若领导是外部 harness 就永远派不出去；
+  现在分工模式下领导平台照常显示（外部平台置灰并说明原因），切到分工时**自动把领导切回 DSH 官方**；
+  旧状态里残留的「分工 + 外部领导」组合也会在打开面板时自动修正。
+- **轮询分快慢两档**：任务在跑时 2.5s 一刷，空闲时 6s 一刷。
+- **Host 端缓存**：外部 harness 配置快照 5s、模型清单 60s、可执行文件查找 60s（换模型写盘后立即失效），
+  不再每次轮询都读盘 / 扫 PATH / 问 provider。
+- **「配置」按钮改成「打开配置」**；找不到平台命令行时按钮保留但置灰并给出提示。
 
 ## 安装
 
@@ -392,8 +405,8 @@ npm 包：<https://www.npmjs.com/package/dsh-lead-panel>（MIT）—— 几种�
 
 ```powershell
 npm test                  # 两个套件一起跑
-node test/self-check.mjs  # 96 项：纯逻辑 + 浏览器半边
-node test/host-smoke.mjs  # 92 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
+node test/self-check.mjs  # 100 项：纯逻辑 + 浏览器半边
+node test/host-smoke.mjs  # 96 项：假 ctx 把 Host 的 HTTP 链路整条跑一遍
 ```
 
 - `self-check`：用量折叠、金额折算、计划抽取、消息过滤、价目表覆盖、**四种工人来源的派活指令**、

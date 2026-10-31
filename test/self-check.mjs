@@ -276,5 +276,11 @@ checkTrue('打开配置文件按钮', clientSource.includes("onOpen(app.id, 'con
 checkTrue('模型下拉用配置里的模型', clientSource.includes('lp-hmodel') && clientSource.includes('app.models'))
 checkTrue('工人来源也能打开平台', clientSource.includes('workerModel') && clientSource.includes('workerApp'))
 
+// ── 12) 0.9.2 优化：分工模式不再有死路 + 空闲轮询降频 ───────────────────────
+checkTrue('分工模式也显示领导平台（旧版整行消失）', clientSource.includes("collabMode === 'split'"))
+checkTrue('分工模式下外部领导置灰并说明原因', clientSource.includes('splitLeaderLocked'))
+checkTrue('轮询分快慢两档', clientSource.includes('POLL_ACTIVE_MS') && clientSource.includes('POLL_IDLE_MS'))
+checkTrue('「配置」按钮明确写成「打开配置」', clientSource.includes("openConfig: '打开配置'"))
+
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)
