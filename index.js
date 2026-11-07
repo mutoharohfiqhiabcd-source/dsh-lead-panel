@@ -1040,6 +1040,147 @@ function externalWorkersFromEvents(events, limit = 8) {
 }
 
 /**
+ * 团队任务浮窗（0.9.4）：任意会话里的团队任务都能被看到。
+ *
+ * 「领导面板」只在领导会话里显示团队卡；但用户也可能在普通对话里直接让 AI 用
+ * Agent Teams（spawn_teammate）或外部 harness 干活。这个接口按会话读名册 +
+ * 外部 harness 的 tool/call，算出「当前任务 / 阶段 / 成员」，给右上角浮窗用。
+ * 不传 sessionId 时，在所有活会话里挑一个正在跑团队任务的。
+ */
+
+function sessionEventTime(events) {
+  let last = 0
+  for (const event of events ?? []) {
+    if (typeof event?.time === 'number' && event.time > last) last = event.time
+  }
+  return last
+}
+
+/** Agent Teams 名册状态 → 浮窗圆点状态（running / idle / done / failed）。 */
+function teammateStatusOf(status) {
+  if (status === 'running') return 'running'
+  if (status === 'provisioning') return 'idle'
+  if (status === 'failed') return 'failed'
+  return 'done'
+}
+
+/** 名册里的队友 → 浮窗成员。 */
+function teammateMembersOf(teams, agent) {
+  if (!teams || !agent) return []
+  let members = []
+  try { members = teams.listMembers(agent) ?? [] } catch { members = [] }
+  return members
+    .filter(member => member.role === 'teammate')
+    .map(member => ({
+      name: String(member.name ?? 'worker'),
+      harness: 'dsh',
+      status: teammateStatusOf(member.status),
+    }))
+}
+
+/** 会话里跑过的外部 harness（Codex / Claude Code）→ 浮窗成员。 */
+function externalMembersOf(events) {
+  return externalWorkersFromEvents(events, 12).map(worker => ({
+    name: worker.description
+      ? String(worker.description).replace(/\s+/gu, ' ').slice(0, 24)
+      : (EXTERNAL_HARNESSES.find(item => item.id === worker.harness)?.label ?? worker.harness),
+    harness: worker.harness,
+    status: worker.status === 'done' ? 'done' : worker.status === 'failed' ? 'failed' : 'running',
+  }))
+}
+
+/**
+ * 一个会话的团队快照。
+ * @param ctx Host 上下文
+ * @param options 插件配置
+ * @param requestedSessionId 面板当前会话（省略时自动挑一个有团队活动的活会话）
+ */
+async function collectTeamState(ctx, options, requestedSessionId) {
+  const s = services(ctx)
+  const empty = {
+    active: false, sessionId: null, sessionTitle: null, leader: null,
+    task: '', stage: 'idle', members: [], lastActivityAt: null,
+  }
+  if (!s.sessions || !s.agents) return empty
+
+  const probe = sessionId => {
+    if (!sessionId) return null
+    let session = null
+    try { session = s.sessions.get(sessionId) ?? null } catch { session = null }
+    if (!session) return null
+    let agent = null
+    try { agent = s.agents.get(sessionId) ?? null } catch { agent = null }
+    return { sessionId, session, agent }
+  }
+
+  let chosen = probe(requestedSessionId)
+  if (!chosen) {
+    // 没指定会话：在所有活会话里挑正在跑团队任务的那个。
+    let agents = []
+    try { agents = s.agents.list?.() ?? [] } catch { agents = [] }
+    let best = null
+    for (const agent of agents) {
+      const candidate = probe(agent?.id)
+      if (!candidate) continue
+      let events = []
+      try { events = candidate.session.snapshotEvents() ?? [] } catch { events = [] }
+      const members = [...teammateMembersOf(s.teams, candidate.agent), ...externalMembersOf(events)]
+      if (members.length === 0) continue
+      const last = sessionEventTime(events)
+      const running = members.some(member => member.status === 'running') || candidate.agent?.status === 'running'
+      const score = running ? 2 : 0
+      if (!best || score > best.score || (score === best.score && last > best.last)) {
+        best = { ...candidate, score, last }
+      }
+    }
+    chosen = best ? { sessionId: best.sessionId, session: best.session, agent: best.agent } : null
+  }
+  if (!chosen) return empty
+
+  const { session, agent } = chosen
+  let events = []
+  try { events = session.snapshotEvents() ?? [] } catch { events = [] }
+  const members = [...teammateMembersOf(s.teams, agent), ...externalMembersOf(events)]
+  const messages = readMessages(session, 60)
+  const plan = extractPlan(messages)
+  const lastUser = [...messages].reverse().find(message => message.role === 'user')
+  const task = plan?.need || (lastUser ? lastUser.text.replace(/\s+/gu, ' ').slice(0, 90) : '')
+
+  let leaderName = null
+  const selection = modelSelectionOf(s.projections, session)
+  if (selection?.lastUsed?.provider && selection?.lastUsed?.model) {
+    leaderName = selection.lastUsed.model
+    try {
+      const models = await listModels(s)
+      const hit = models.groups
+        .find(group => group.id === selection.lastUsed.provider)
+        ?.models.find(model => model.id === selection.lastUsed.model)
+      if (hit?.name) leaderName = hit.name
+    } catch { /* 展示名拿不到就用模型 id */ }
+  }
+  if (!leaderName) leaderName = agent?.options?.model ?? null
+
+  const leadRunning = session?.status === 'running' || agent?.status === 'running'
+  const membersRunning = members.some(member => member.status === 'running')
+  const active = Boolean(leadRunning || membersRunning)
+  let stage = 'idle'
+  if (leadRunning) stage = 'running'
+  else if (membersRunning) stage = 'waiting'
+  else if (members.length > 0) stage = 'done'
+
+  return {
+    active,
+    sessionId: chosen.sessionId,
+    sessionTitle: session?.header?.title ?? null,
+    leader: { name: leaderName, harness: 'dsh', label: 'DSH 官方' },
+    task,
+    stage,
+    members,
+    lastActivityAt: sessionEventTime(events) || session?.header?.createdAt || null,
+  }
+}
+
+/**
  * 从最后一条「四段式」回复里抽出计划：需求 / 效果 / 分工 / 预计时间。
  * 领导按派活指令回答时会带这四个方括号小标题，抽出来面板就能用卡片渲染。
  */
@@ -1479,13 +1620,19 @@ function createApiHandler(ctx, options) {
           sendJson(res, 200, { ok: true, data: await collectState(ctx, options) })
           return
         }
+        case 'team': {
+          // 团队任务浮窗（0.9.4）：任意会话的团队快照；不带 sessionId 时自动挑一个在跑的。
+          const sessionId = url.searchParams.get('sessionId') ?? undefined
+          sendJson(res, 200, { ok: true, data: await collectTeamState(ctx, options, sessionId || undefined) })
+          return
+        }
         case 'health': {
           const s = services(ctx)
           sendJson(res, 200, {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-11-07T16:45',
+              build: '2026-11-07T18:10',
               route: options.route,
               statePath: statePath(),
               state: readState(),
@@ -1756,6 +1903,10 @@ export const internals = {
   dispatchInstruction,
   externalWorkersFromEvents,
   parseToolArguments,
+  collectTeamState,
+  teammateMembersOf,
+  externalMembersOf,
+  sessionEventTime,
   HARNESS_MODES,
   EXTERNAL_HARNESSES,
   leaderOptions,

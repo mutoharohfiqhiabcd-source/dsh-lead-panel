@@ -50,7 +50,7 @@ token、估算金额、用时和预计剩余时间。
 模型，选一下就能换（下一条回复生效），旁边还有「打开 Codex」「配置」两个按钮——
 一键进它自己的界面，或直接改它的配置文件。
 
-当前版本 **0.9.3** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 108 项 + Host 冒烟 96 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+当前版本 **0.9.4** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 116 项 + Host 冒烟 107 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -350,6 +350,19 @@ DSH 官方本来就带两个 subagent 提供方包：
 
 - 圆点颜色跟着成员自己的 harness 走（DSH 蓝 / Codex 象牙白 / Claude 橙），卡里带一行图例。
 - 下面的「工人」详情行也同步换成了左侧 harness 色条 + 状态圆点 + harness 徽标。
+
+## 0.9.4 团队任务浮窗（任意会话触发都显示）
+
+![团队任务浮窗：右上角自动出现，复用团队总览卡](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-team-hud.png)
+
+- **不用开领导面板**：只要任意会话里触发了团队任务 —— Agent Teams 的 `spawn_teammate`，
+  或一次 Codex / Claude Code 执行 —— 右上角就浮出团队卡；全部结束后保留 20 秒自动收起。
+- **看的是当前会话**：客户端从 `uiSession` 取当前页面所在会话 id，轮询
+  `GET /lead-panel/api/team?sessionId=`；Host 也会在所有活会话里自动挑正在跑团队任务的那个（不传参时）。
+- **内容**复用 0.9.3 的团队总览卡：AI 名字 / harness 徽标 / 当前任务 / 阶段 / 成员圆点 + 图例；
+  成员 ≥4 个同样折叠成 4 个点 + 数量 + 展开。
+- 浮窗注册在 DSH 的整页浮层槽位 `shell.overlay`，fixed 在右上角；点「×」收起 60 秒，
+  有新活动会重新出现。只读，不影响任何任务。
 
 ## 安装
 

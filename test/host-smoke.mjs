@@ -106,6 +106,7 @@ const prompts = []
 const selected = []
 const subagentRuns = []
 let modelCalls = 0
+let teamAgentsOn = true
 let subagentReply = '（默认外部 harness 回复）'
 const persisted = {
   [WORKER_COLD]: [
@@ -130,7 +131,10 @@ const ctx = {
       listModels: async () => { modelCalls += 1; return [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }] },
     },
     sessions: { get: id => sessions.get(id) ?? null },
-    agents: { get: id => (id === LEAD ? { id: LEAD, session: sessions.get(LEAD), status: 'idle' } : undefined) },
+    agents: {
+      get: id => (id === LEAD ? { id: LEAD, session: sessions.get(LEAD), status: 'idle', options: { model: 'deepseek-flash' } } : undefined),
+      list: () => (teamAgentsOn ? [{ id: LEAD, session: sessions.get(LEAD), status: 'idle', options: { model: 'deepseek-flash' } }] : []),
+    },
     sessionProjections: {
       stateOf: (session, key) => {
         if (key === 'modelSelection') return { lastUsed: { provider: 'deepseek-official', model: 'deepseek-flash' }, pending: null }
@@ -140,11 +144,11 @@ const ctx = {
       },
     },
     agentTeams: {
-      listMembers: () => [
+      listMembers: agent => (agent?.id === LEAD ? [
         { id: LEAD, name: 'lead', role: 'lead', status: 'idle' },
         { id: WORKER_LIVE, name: 'readme-writer', role: 'teammate', status: 'running', description: '改 README 安装节', provider: 'spawn', model: 'deepseek-flash', diagnostics: [] },
         { id: WORKER_COLD, name: 'link-checker', role: 'teammate', status: 'inactive', description: '查链接', provider: 'spawn', model: 'deepseek-flash', diagnostics: [] },
-      ],
+      ] : []),
     },
     sessionPersistence: {
       open: async id => ({
@@ -193,7 +197,7 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-11-07T16:45')
+check('health 带 build 标记', health.body.data.build, '2026-11-07T18:10')
 check('health 报出协作模式', health.body.data.modes, ['single', 'split', 'consult', 'pipeline'])
 checkTrue('health 带外部 harness 配置快照', Boolean(health.body.data.harnessApps.codex))
 checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
@@ -353,6 +357,25 @@ await request('POST', 'leader', { leader: 'dsh' })
 const splitOk = await request('POST', 'run', { mode: 'split', picks: ['dsh', 'codex'], text: '分工做' })
 check('切回 DSH 后分工可用', splitOk.status, 200)
 checkTrue('分工指令进了领导会话', prompts.at(-1).request.content[0].text.includes('subagent_codex'))
+
+// ── 0.9.4 团队任务浮窗：任意会话的团队快照（不经过领导面板） ──────────────────
+const teamState = await request('GET', 'team', undefined, `?sessionId=${LEAD}`)
+check('team 状态码 200', teamState.status, 200)
+const team = teamState.body.data
+check('team 记下会话 id', team.sessionId, LEAD)
+check('team 任务来自计划卡', team.task, '写清安装步骤')
+check('team 阶段：领导空闲但成员在跑 = waiting', team.stage, 'waiting')
+check('team 判定为进行中', team.active, true)
+check('team 成员 = 两个队友 + 一个 Codex', team.members.map(member => member.harness), ['dsh', 'dsh', 'codex'])
+check('team 队友状态', [team.members[0].status, team.members[1].status], ['running', 'done'])
+check('team 外部成员完成', team.members[2].status, 'done')
+check('team 领导展示名用模型名', team.leader.name, 'DeepSeek-V41-Flash')
+const teamAuto = await request('GET', 'team')
+check('team 不传会话时自动挑有团队活动的会话', teamAuto.body.data.sessionId, LEAD)
+teamAgentsOn = false
+const teamEmpty = await request('GET', 'team')
+check('team 没有团队活动时为空', [teamEmpty.body.data.active, teamEmpty.body.data.members.length], [false, 0])
+teamAgentsOn = true
 
 const missing = await request('GET', 'nope')
 check('未知接口 404', missing.status, 404)

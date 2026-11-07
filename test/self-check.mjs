@@ -234,20 +234,24 @@ checkTrue('client 注册了模块', registration !== null && registration.id ===
 const plugin = registration.factory(requireShim)
 check('client 插件名', plugin.name, 'dsh-lead-panel')
 check('client inject 覆盖 slots', plugin.inject.includes('slots'), true)
-let slotName = null
-let slotOptions = null
-let component = null
+check('client inject 覆盖 uiSession（拿当前会话）', plugin.inject.includes('uiSession'), true)
+const slotNames = []
+const entries = []
 plugin.apply({
   locale: { getSnapshot: () => ({ active: 'zh-CN' }) },
+  uiSession: { adapter: { current: { getSnapshot: () => ({ props: { sessionId: 'session-check' } }), subscribe: () => () => {} } } },
   slots: {
-    inject: (name, register) => { slotName = name; register() },
-    register: (opts, Comp) => { slotOptions = opts; component = Comp },
+    inject: (name, register) => { slotNames.push(name); register() },
+    register: (opts, Comp) => { entries.push({ opts, Comp }) },
   },
 })
-check('注册到「完全权限」右边的槽位', slotName, 'conversation.input.left')
-check('槽位 id', slotOptions.id, 'dsh-lead-panel')
-checkTrue('槽位 order 是数字', typeof slotOptions.order === 'number')
-checkTrue('拿到组件', typeof component === 'function')
+check('注册到「完全权限」右边 + 右上角浮层两个槽位', slotNames, ['shell.overlay', 'conversation.input.left'])
+const inputEntry = entries.find(entry => entry.opts.name === 'conversation.input.left')
+const hudEntry = entries.find(entry => entry.opts.name === 'shell.overlay')
+check('槽位 id', inputEntry.opts.id, 'dsh-lead-panel')
+checkTrue('槽位 order 是数字', typeof inputEntry.opts.order === 'number')
+checkTrue('拿到组件', entries.every(entry => typeof entry.Comp === 'function'))
+check('浮窗注册到 shell.overlay', [hudEntry.opts.id, hudEntry.opts.name], ['dsh-lead-panel.team-hud', 'shell.overlay'])
 checkTrue('组件带 notranslate（防 Chrome 翻译）', clientSource.includes('notranslate'))
 
 // ── 8) 模型下拉：不再用原生 select，且能区分同名模型 ───────────────────────
@@ -294,6 +298,14 @@ checkTrue('成员 <4 个直接显示名字', clientSource.includes('lp-mnames') 
 checkTrue('成员详情行也按 harness 上色', clientSource.includes('lp-wharness') && clientSource.includes('dotStyle(harness)'))
 checkTrue('卡片展示当前任务与阶段', clientSource.includes('t(\'task\')') && clientSource.includes('t(\'stage\')'))
 checkTrue('成员图例在卡片里', clientSource.includes('lp-mlegend') && clientSource.includes('memberRunning'))
+
+// ── 14) 0.9.4 团队任务浮窗（任意会话触发都显示，右上角） ─────────────────────
+checkTrue('浮窗组件存在', clientSource.includes('function TeamHud'))
+checkTrue('浮窗挂在右上角', clientSource.includes('lp-hud') && clientSource.includes('position: fixed'))
+checkTrue('浮窗按当前会话查团队', clientSource.includes('call(`/team${query}`)'))
+checkTrue('浮窗复用团队卡并接管阶段文案', clientSource.includes('h(TeamCard, {') && clientSource.includes('stageText'))
+checkTrue('浮窗可收起、有新动静再出现', clientSource.includes('hiddenUntil') && clientSource.includes('20_000'))
+checkTrue('当前会话从 uiSession 取', clientSource.includes('UI_SESSION?.adapter?.current'))
 
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)
