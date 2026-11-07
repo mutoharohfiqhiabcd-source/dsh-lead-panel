@@ -282,5 +282,18 @@ checkTrue('分工模式下外部领导置灰并说明原因', clientSource.inclu
 checkTrue('轮询分快慢两档', clientSource.includes('POLL_ACTIVE_MS') && clientSource.includes('POLL_IDLE_MS'))
 checkTrue('「配置」按钮明确写成「打开配置」', clientSource.includes("openConfig: '打开配置'"))
 
+// ── 13) 0.9.3 团队总览卡（按需求图：AI 名字 / harness / 任务阶段 / 成员圆点）────
+checkTrue('团队总览卡', clientSource.includes('function TeamCard') && clientSource.includes("className: 'lp-team'"))
+checkTrue('每个 harness 一套配色（深蓝 / 象牙白 / 深橙）', clientSource.includes('HARNESS_STYLE')
+  && clientSource.includes("dsh: { label: 'DSH 官方', accent: '#60a5fa'")
+  && clientSource.includes("codex: { label: 'Codex', accent: '#e8dcc0'")
+  && clientSource.includes("'claude-code': { label: 'Claude Code', accent: '#fb923c'"))
+checkTrue('成员圆点三种状态（空心 / 粗圈 / 实心）', clientSource.includes('lp-mdot') && clientSource.includes('memberStatusOf'))
+checkTrue('成员 ≥4 个折叠成点 + 展开按钮', clientSource.includes('lp-mexpand') && clientSource.includes('lp-mcount'))
+checkTrue('成员 <4 个直接显示名字', clientSource.includes('lp-mnames') && clientSource.includes('lp-mname'))
+checkTrue('成员详情行也按 harness 上色', clientSource.includes('lp-wharness') && clientSource.includes('dotStyle(harness)'))
+checkTrue('卡片展示当前任务与阶段', clientSource.includes('t(\'task\')') && clientSource.includes('t(\'stage\')'))
+checkTrue('成员图例在卡片里', clientSource.includes('lp-mlegend') && clientSource.includes('memberRunning'))
+
 console.log(failures === 0 ? '\n全部通过 ✓' : `\n${failures} 项失败 ✗`)
 process.exit(failures === 0 ? 0 : 1)

@@ -50,7 +50,7 @@ token、估算金额、用时和预计剩余时间。
 模型，选一下就能换（下一条回复生效），旁边还有「打开 Codex」「配置」两个按钮——
 一键进它自己的界面，或直接改它的配置文件。
 
-当前版本 **0.9.2** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 100 项 + Host 冒烟 96 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
+当前版本 **0.9.3** ｜ [更新说明](RELEASE_NOTES.md) ｜ 自检 108 项 + Host 冒烟 96 项全过 ｜ 依赖官方 Agent Teams / 官方 Codex、Claude Code subagent 提供方（实验性）
 
 ![DSH 领导面板](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel.png)
 
@@ -334,6 +334,22 @@ DSH 官方本来就带两个 subagent 提供方包：
 - **Host 端缓存**：外部 harness 配置快照 5s、模型清单 60s、可执行文件查找 60s（换模型写盘后立即失效），
   不再每次轮询都读盘 / 扫 PATH / 问 provider。
 - **「配置」按钮改成「打开配置」**；找不到平台命令行时按钮保留但置灰并给出提示。
+
+## 0.9.3 UI：团队总览卡（AI 名字 / harness / 任务阶段 / 成员圆点）
+
+![团队总览卡：按 harness 配色，成员圆点区分未运行 / 运行中 / 已完成](https://raw.githubusercontent.com/mutoharohfiqhiabcd-source/dsh-lead-panel/main/images/panel-team.png)
+
+面板顶部多了一张「团队总览卡」，一眼看清谁在干活：
+
+| 区域 | 内容 |
+|---|---|
+| 左上 / 右上 | AI 名字（模型名）+ 对应的 harness 徽标；**背景色按 harness 区分**：DSH 官方（DeepSeek）深蓝、Codex（GPT）象牙白、Claude Code 深橙 |
+| 当前任务 | 领导正在处理的那件事（取计划卡的【需求】，没有就用最后一条用户消息） |
+| 阶段 | 待开始 / 空闲 / 运行中 / 等待成员 / 已完成；外部 harness 当领导时显示「领导运行中」 |
+| 创造的成员 | 彩色圆点：**空心** = 已创建未运行或已结束，**粗圈** = 运行中 / 等领导回应，**实心偏暗** = 已完成该任务；<4 个直接显示名字，≥4 个显示 4 个点 + 数量 + 展开按钮（点开展示全部成员名字） |
+
+- 圆点颜色跟着成员自己的 harness 走（DSH 蓝 / Codex 象牙白 / Claude 橙），卡里带一行图例。
+- 下面的「工人」详情行也同步换成了左侧 harness 色条 + 状态圆点 + harness 徽标。
 
 ## 安装
 

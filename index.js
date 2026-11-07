@@ -1485,7 +1485,7 @@ function createApiHandler(ctx, options) {
             ok: true,
             data: {
               plugin: 'dsh-lead-panel',
-              build: '2026-11-01T01:30',
+              build: '2026-11-07T16:45',
               route: options.route,
               statePath: statePath(),
               state: readState(),

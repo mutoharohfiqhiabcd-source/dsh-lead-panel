@@ -193,7 +193,7 @@ function request(method, action, body, query = '') {
 
 const health = await request('GET', 'health')
 check('health 状态码 200', health.status, 200)
-check('health 带 build 标记', health.body.data.build, '2026-11-01T01:30')
+check('health 带 build 标记', health.body.data.build, '2026-11-07T16:45')
 check('health 报出协作模式', health.body.data.modes, ['single', 'split', 'consult', 'pipeline'])
 checkTrue('health 带外部 harness 配置快照', Boolean(health.body.data.harnessApps.codex))
 checkTrue('health 报出领导平台', health.body.data.leaders.includes('dsh') && health.body.data.leaders.includes('harness:codex'))
